@@ -1,0 +1,45 @@
+NAME
+	gcmap - graphical character selection utility
+
+SYNOPSIS
+	gcmap [-f font-family] [-s [font-size][/[[min]-[max]]]] [-B | -S] [-bi]
+
+DESCRIPTION
+	gcmap is a graphical utility for browsing and copying characters.
+
+OPTIONS
+	The gcmap utility conforms to the Base Definitions
+	volume of POSIX.1-2017, Section 12.2, Utility Syntax Guidelines.
+
+	The following options are supported:
+
+	-B
+		Use listing by Unicode block by default.
+
+	-b
+		Use bold font by default
+
+	-f font-family
+		Use font-family as the default font family.
+
+	-i
+		Use italic or oblique font by default.
+
+	-S
+		Use listing by script by default.
+
+	-s [font-size][/[[min]-[max]]]
+		Set the default font size, in the character
+		table, to font-size.
+
+		Set the minimum font size, in the character
+		table, to min.
+
+		Set the maximum font size, in the character
+		table, to max.
+
+OPERANDS
+	No operands are supported.
+
+SEE ALSO
+	None.

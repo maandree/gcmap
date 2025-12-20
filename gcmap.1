@@ -1,0 +1,67 @@
+.TH GCMAP 1 gcmap
+.SH NAME
+gcmap \- graphical character selection utility
+
+.SH SYNOPSIS
+.B gcmap
+[-f
+.IR font-family ]
+[-s
+.RI [ font-size ][\fB/\fP[[ min ]\fB\-\fP[ max ]]]]
+[-B | -S] [-bi]
+
+.SH DESCRIPTION
+.B gcmap
+is a graphical utility for browsing and copying characters.
+
+.SH OPTIONS
+The
+.B gcmap
+utility conforms to the Base Definitions
+volume of POSIX.1-2017,
+.IR "Section 12.2" ,
+.IR "Utility Syntax Guidelines" .
+.PP
+The following options are supported:
+.TP
+.B -B
+Use listing by Unicode block by default.
+.TP
+.B -b
+Use bold font by default
+.TP
+.BR -f \ \fIfont-family\fP
+Use
+.I font-family
+as the default font family.
+.TP
+.B -i
+Use italic or oblique font by default.
+.TP
+.B -S
+Use listing by script by default.
+.TP
+.RI \fB-s\fP\ [ font-size ][\fB/\fP[[ min ]\fB-\fP[ max ]]]
+Set the default font size, in the character
+table, to
+.IR font-size .
+
+Set the minimum font size, in the character
+table, to
+.IR min .
+
+Set the maximum font size, in the character
+table, to
+.IR max .
+
+.SH OPERANDS
+No operands are supported.
+
+.SH ENVIRONMENT VARIABLES
+The execution of
+.B gcmap
+is affected by environment variables that
+affects its tooltik.
+
+.SH SEE ALSO
+None.
