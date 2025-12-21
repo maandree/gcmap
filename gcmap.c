@@ -16,6 +16,11 @@
 USAGE("[-f font-family] [-s [font-size][/[[min]-[max]]]] [-B | -S] [-bi]");
 
 
+#if GTK_CHECK_VERSION(2, 12, 0)
+# define HAVE_ITEM_TOOLTIPS
+#endif
+
+
 #define COMMA ,
 
 #define DEFAULT_LISTING_TYPE "script"
@@ -39,8 +44,10 @@ static unsigned int small_font_size_increment = 1;
 static unsigned int big_font_size_increment = 8;
 
 static GtkWidget *window;
+static GtkWidget *notebook;
 static GtkWidget *copytext;
 static GtkWidget *statusbar;
+static GtkWidget *grouplist;
 static GtkWidget *listcombo;
 static GtkWidget *fontcombo;
 static GtkWidget *bold;
@@ -49,9 +56,18 @@ static GtkWidget *sizespinner;
 static GtkWidget *nextgroup;
 static GtkWidget *prevgroup;
 static GtkWidget *bylisting[NLISTINGS];
+static GtkWidget *vtabtext;
 static GtkListStore *fontcombo_store;
 static GtkAdjustment *fontsize_adjustment;
 static GtkAccelGroup *accelgroup;
+
+#ifdef HAVE_ITEM_TOOLTIPS
+/* relying on initialisation to NULL and 0 */
+static const char **group_tooltips[NLISTINGS];
+static size_t ngroup_tooltips[NLISTINGS];
+static const char **groups_tooltips;
+static size_t ngroups_tooltips;
+#endif
 
 
 static void
@@ -80,19 +96,148 @@ populate_font_families(GtkWidget *widget, GtkListStore *store)
 }
 
 
+#ifdef HAVE_ITEM_TOOLTIPS
+
+
+static int
+grouplist_query_tooltip(GtkWidget *widget, int x, int y, int keyboard_mode,
+                        GtkTooltip *tooltip, void *user_data)
+{
+	GtkTreeView *treeview = GTK_TREE_VIEW(grouplist);
+	GtkTreePath *path = NULL;
+	GtkTreeSelection *selection;
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	int index;
+
+	(void) widget;
+	(void) user_data;
+
+	if (keyboard_mode) {
+		selection = gtk_tree_view_get_selection(treeview);
+		if (gtk_tree_selection_get_selected(selection, &model, &iter) == 0)
+			return 0;
+		path = gtk_tree_model_get_path(model, &iter);
+	} else {
+		if (!gtk_tree_view_get_path_at_pos(treeview, x, y, &path, NULL, NULL, NULL))
+			return 0;
+	}
+
+	index = gtk_tree_path_get_indices(path)[0];
+	if (index < 0 || (size_t)index >= ngroups_tooltips) {
+		gtk_tree_path_free(path);
+		return 0;
+	}
+
+	gtk_tooltip_set_text(tooltip, groups_tooltips[index]);
+	gtk_tree_view_set_tooltip_row(treeview, tooltip, path);
+	gtk_tree_path_free(path);
+	return 1;
+}
+
+
+static char *
+script_tooltip(const struct libcmap_script *script)
+{
+	unsigned long int low, high;
+	size_t i, len, off = 0;
+	int r;
+	char *ret;
+
+	if (!script->nranges)
+		return NULL;
+
+	len = strlen(script->name) + 1U;
+	for (i = 0; i < script->nranges; i++) {
+		low = (unsigned long int)script->ranges[i].first;
+		high = (unsigned long int)script->ranges[i].last;
+		r = snprintf(NULL, 0, "U+%04lX–U+%04lX", low, high);
+		if (r < 0)
+			return NULL;
+		len += (size_t)r + 2U;
+	}
+
+	ret = malloc((size_t)len + 1U);
+	if (!ret)
+		return NULL;
+
+	stpcpy(ret, script->name);
+	off = strlen(script->name);
+	ret[off++] = ' ';
+	ret[off++] = '(';
+	for (i = 0; i < script->nranges; i++) {
+		low = (unsigned long int)script->ranges[i].first;
+		high = (unsigned long int)script->ranges[i].last;
+		r = sprintf(&ret[off], "%sU+%04lX–U+%04lX", i ? ", " : "", low, high);
+		if (r < 0)
+			return NULL;
+		off += (size_t)r;
+		if (off >= len)
+			abort();
+	}
+	ret[off++] = ')';
+	ret[off] = '\0';
+
+	return ret;
+}
+
+
+static char *
+block_tooltip(const struct libcmap_block *block)
+{
+	unsigned long int low = (unsigned long int)block->range.first;
+	unsigned long int high = (unsigned long int)block->range.last;
+	int len, r;
+	char *ret;
+
+	len = snprintf(NULL, 0, "%s (U+%04lX–U+%04lX)", block->name, low, high);
+	if (len < 0)
+		return NULL;
+
+	ret = malloc((size_t)len + 1U);
+	if (!ret)
+		return NULL;
+
+	r = sprintf(ret, "%s (U+%04lX–U+%04lX)", block->name, low, high);
+	if (r < 0 || r > len)
+		abort();
+
+	return ret;
+}
+
+
+#endif /* HAVE_ITEM_TOOLTIPS */
+
+
 static void
 populate_scripts(GtkListStore *store)
 {
 	const struct libcmap_script *list = libcmap_script_list;
 	size_t i, n = libcmap_script_list_size;
 	GtkTreeIter iter;
+
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "All", -1);
 	for (i = 0; i < n; i++) {
 		gtk_list_store_append(store, &iter);
 		gtk_list_store_set(store, &iter, 0, list[i].name, -1);
-		/* TODO tooltip should be the name, followed by the ranges in brackets */
 	}
+
+#ifdef HAVE_ITEM_TOOLTIPS
+	if (!group_tooltips[BY_SCRIPT]) {
+		ngroup_tooltips[BY_SCRIPT] = n + 1U;
+		group_tooltips[BY_SCRIPT] = calloc(ngroup_tooltips[BY_SCRIPT], sizeof(**group_tooltips));
+		group_tooltips[BY_SCRIPT][0] = "All (U+0000–U+10FFFF)";
+		for (i = 0; i < n; i++) {
+			if (!strcmp(list[i].name, "Unknown"))
+				group_tooltips[BY_SCRIPT][i + 1U] = "Unknown (Codepoints not assigned any script)";
+			else
+				group_tooltips[BY_SCRIPT][i + 1U] = script_tooltip(&list[i]);
+		}
+	}
+	groups_tooltips = group_tooltips[BY_SCRIPT];
+	ngroups_tooltips = ngroup_tooltips[BY_SCRIPT];
+#endif
 }
 
 
@@ -102,13 +247,28 @@ populate_blocks(GtkListStore *store)
 	const struct libcmap_block *list = libcmap_block_list;
 	size_t i, n = libcmap_block_list_size;
 	GtkTreeIter iter;
+
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "All", -1);
 	for (i = 0; i < n; i++) {
 		gtk_list_store_append(store, &iter);
 		gtk_list_store_set(store, &iter, 0, list[i].name, -1);
-		/* TODO tooltip should be the name, followed by the range in brackets */
 	}
+	gtk_list_store_append(store, &iter);
+	gtk_list_store_set(store, &iter, 0, "No Block", -1);
+
+#ifdef HAVE_ITEM_TOOLTIPS
+	if (!group_tooltips[BY_BLOCK]) {
+		ngroup_tooltips[BY_BLOCK] = n + 2U;
+		group_tooltips[BY_BLOCK] = calloc(ngroup_tooltips[BY_BLOCK], sizeof(**group_tooltips));
+		group_tooltips[BY_BLOCK][0] = "All (U+0000–U+10FFFF)";
+		group_tooltips[BY_BLOCK][n + 1U] = "No Block (Codepoints not assigned any block)";
+		for (i = 0; i < n; i++)
+			group_tooltips[BY_BLOCK][i + 1U] = block_tooltip(&list[i]);
+	}
+	groups_tooltips = group_tooltips[BY_BLOCK];
+	ngroups_tooltips = ngroup_tooltips[BY_BLOCK];
+#endif
 }
 
 
@@ -177,16 +337,17 @@ listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 {
 	static int recursion_guard = 0;
 	GtkWidget *label;
+	int listing;
 
 	if (recursion_guard)
 		return;
 	recursion_guard++;
 
-	switch (gtk_combo_box_get_active(combo)) {
+	listing = gtk_combo_box_get_active(combo);
+
+	switch (listing) {
 #define X(ENUM, TITLE, TYPE, SELFUN, POPFUN, ACCEL)\
 	case ENUM:\
-		if (!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(bylisting[ENUM])))\
-			gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(bylisting[ENUM]), TRUE);\
 		label = gtk_bin_get_child(GTK_BIN(nextgroup));\
 		gtk_label_set_text_with_mnemonic(GTK_LABEL(label), "N_ext "TYPE);\
 		label = gtk_bin_get_child(GTK_BIN(prevgroup));\
@@ -196,7 +357,12 @@ listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 		break
 	LIST_LISTINGS(X, ;);
 #undef X
+	default:
+		abort();
 	}
+
+	if (!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(bylisting[listing])))
+		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(bylisting[listing]), TRUE);
 
 	/* TODO select appropriate list item to keep select character */
 
@@ -242,8 +408,26 @@ add_menu_item(GtkWidget *parent, const char *label, const char *icon, unsigned i
 		item = gtk_menu_item_new_with_mnemonic(label);
 	}
 	gtk_menu_shell_append(GTK_MENU_SHELL(parent), item);
-	gtk_widget_add_accelerator(item, "activate", accelgroup, key, mods, GTK_ACCEL_VISIBLE);
-	g_signal_connect(item, "activate", G_CALLBACK(action), NULL);
+	if (key)
+		gtk_widget_add_accelerator(item, "activate", accelgroup, key, mods, GTK_ACCEL_VISIBLE);
+	if (action)
+		g_signal_connect(item, "activate", G_CALLBACK(action), NULL);
+	return item;
+}
+
+
+static GtkWidget *
+add_check_menu_item(GtkWidget *parent, const char *label, int checked, unsigned int key,
+                    GdkModifierType mods, void (*action)(GtkWidget *menu_item, void *user_data))
+{
+	GtkWidget *item;
+	item = gtk_check_menu_item_new_with_mnemonic(label);
+	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), checked);
+	gtk_menu_shell_append(GTK_MENU_SHELL(parent), item);
+	if (key)
+		gtk_widget_add_accelerator(item, "activate", accelgroup, key, mods, GTK_ACCEL_VISIBLE);
+	if (action)
+		g_signal_connect(item, "activate", G_CALLBACK(action), NULL);
 	return item;
 }
 
@@ -254,11 +438,12 @@ add_radio_menu_item(GtkWidget *parent, const char *label, GSList **groupp, unsig
 {
 	GtkWidget *item;
 	item = gtk_radio_menu_item_new_with_mnemonic(*groupp, label);
-	if (!*groupp)
-		*groupp = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(item));
+	*groupp = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(item));
 	gtk_menu_shell_append(GTK_MENU_SHELL(parent), item);
-	gtk_widget_add_accelerator(item, "activate", accelgroup, key, mods, GTK_ACCEL_VISIBLE);
-	g_signal_connect(item, "activate", G_CALLBACK(action), NULL);
+	if (key)
+		gtk_widget_add_accelerator(item, "activate", accelgroup, key, mods, GTK_ACCEL_VISIBLE);
+	if (action)
+		g_signal_connect(item, "activate", G_CALLBACK(action), NULL);
 	return item;
 }
 
@@ -336,18 +521,52 @@ go_prev(GtkWidget *menu_item, void *user_data) /* TODO */
 
 
 static void
-go_down(GtkWidget *menu_item, void *user_data) /* TODO */
+go_up_or_down(int adj)
 {
-	(void) menu_item;
-	(void) user_data;
+	GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(grouplist));
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	GtkTreePath *path;
+	int selcount;
+	int index;
+
+	selcount = gtk_tree_selection_get_selected(selection, &model, &iter);
+	if (selcount == 0) {
+		index = -1;
+	} else {
+		path = gtk_tree_model_get_path(model, &iter);
+		index = gtk_tree_path_get_indices(path)[0];
+		gtk_tree_path_free(path);
+	}
+
+	index += adj;
+	if (index < 0)
+		return;
+	if (index >= gtk_tree_model_iter_n_children(model, NULL))
+		return;
+
+	path = gtk_tree_path_new_from_indices(index, -1);
+	gtk_tree_selection_unselect_all(selection);
+	gtk_tree_selection_select_path(selection, path);
+	gtk_tree_path_free(path);
 }
 
 
 static void
-go_up(GtkWidget *menu_item, void *user_data) /* TODO */
+go_down(GtkWidget *menu_item, void *user_data)
 {
 	(void) menu_item;
 	(void) user_data;
+	go_up_or_down(+1);
+}
+
+
+static void
+go_up(GtkWidget *menu_item, void *user_data)
+{
+	(void) menu_item;
+	(void) user_data;
+	go_up_or_down(-1);
 }
 
 
@@ -372,23 +591,107 @@ go_up_accel(GtkAccelGroup *accel_group, GObject *acceleratable, unsigned int key
 	(void) acceleratable;
 	(void) keyval;
 	(void) modifier;
-	go_down(prevgroup, user_data);
+	go_up(prevgroup, user_data);
 	return TRUE;
+}
+
+
+static int
+select_page_accel(GtkAccelGroup *accel_group, GObject *acceleratable, unsigned int keyval,
+                  GdkModifierType modifier, void *user_data)
+{
+	(void) accel_group;
+	(void) acceleratable;
+	(void) modifier;
+	(void) user_data;
+	gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), (int)(keyval - GDK_1));
+	return TRUE;
+}
+
+
+static void
+set_tab_angle(float degrees)
+{
+	int i, n = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebook));
+	GtkWidget *page, *tab;
+	for (i = 0; i < n; i++) {
+		page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(notebook), i);
+		tab = gtk_notebook_get_tab_label(GTK_NOTEBOOK(notebook), page);
+		if (!GTK_IS_LABEL(tab))
+			continue;
+		gtk_label_set_angle(GTK_LABEL(tab), degrees);
+	}
+}
+
+
+static void
+tabs_on_top(GtkWidget *menu_item, void *user_data)
+{
+	(void) menu_item;
+	(void) user_data;
+	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_TOP);
+	set_tab_angle(0);
+	gtk_widget_set_sensitive(vtabtext, FALSE);
+}
+
+
+static void
+tabs_on_left(GtkWidget *menu_item, void *user_data)
+{
+	(void) menu_item;
+	(void) user_data;
+	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_LEFT);
+	set_tab_angle(gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(vtabtext)) ? 90 : 0);
+	gtk_widget_set_sensitive(vtabtext, TRUE);
+}
+
+
+static void
+tabs_on_bottom(GtkWidget *menu_item, void *user_data)
+{
+	(void) menu_item;
+	(void) user_data;
+	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_BOTTOM);
+	set_tab_angle(0);
+	gtk_widget_set_sensitive(vtabtext, FALSE);
+}
+
+
+static void
+tabs_on_right(GtkWidget *menu_item, void *user_data)
+{
+	(void) menu_item;
+	(void) user_data;
+	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_RIGHT);
+	set_tab_angle(gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(vtabtext)) ? 90 : 0);
+	gtk_widget_set_sensitive(vtabtext, TRUE);
+}
+
+
+static void
+vtabtext_changed(GtkWidget *menu_item, void *user_data)
+{
+	(void) menu_item;
+	(void) user_data;
+	if (!gtk_widget_get_sensitive(vtabtext))
+		return;
+	set_tab_angle(gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(vtabtext)) ? 90 : 0);
 }
 
 
 static void
 create_window(void)
 {
-	GtkWidget *vbox, *hbox, *notebook, *left, *scrolled;
+	GtkWidget *vbox, *hbox, *left, *scrolled;
 	GtkWidget *label, *copybutton, *align, *menubar, *menu;
 	GtkListStore *store;
-	GtkWidget *treeview;
 	GtkCellRenderer *renderer;
 	GtkTreeViewColumn *column;
 	GtkObject *obj;
 	AtkObject *accessible;
+	GClosure *closure;
 	GSList *group;
+	int i, n;
 
 	window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	g_signal_connect(window, "destroy", G_CALLBACK(&gtk_main_quit), NULL);
@@ -406,19 +709,32 @@ create_window(void)
 	menu = add_menu(menubar, "_File");
 	add_menu_item(menu, "_Close", "window-close", GDK_w, GDK_CONTROL_MASK, &close_window);
 
+	menu = add_menu(menubar, "_Layout");
+	group = NULL;
+	add_radio_menu_item(menu, "Tabs on _top", &group, 0, 0, &tabs_on_top);
+	add_radio_menu_item(menu, "Tabs on _left", &group, 0, 0, &tabs_on_left);
+	add_radio_menu_item(menu, "Tabs on _bottom", &group, 0, 0, &tabs_on_bottom);
+	add_radio_menu_item(menu, "Tabs on _right", &group, 0, 0, &tabs_on_right);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+	vtabtext = add_check_menu_item(menu, "_Vertical tab text", 1, 0, 0, &vtabtext_changed);
+	gtk_widget_set_sensitive(vtabtext, FALSE);
+	/* TODO add options to put some tabs in side-pane on the right */
+	/* TODO add option for shorter tab texts */
+
 	menu = add_menu(menubar, "_View");
 	group = NULL;
 #define X(ENUM, TITLE, TYPE, SELFUN, POPFUN, ACCEL)\
 	bylisting[ENUM] = add_radio_menu_item(menu, TITLE, &group, ACCEL, GDK_CONTROL_MASK, &SELFUN)
 	LIST_LISTINGS(X, ;);
 #undef X
+	/* TODO add option to use character list (show glyphs with names in rows) instead of character grid */
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 	add_menu_item(menu, "_Larger glyphs", "zoom-in", GDK_plus, GDK_CONTROL_MASK, &zoom_in);
 	add_menu_item(menu, "S_maller glyphs", "zoom-out", GDK_minus, GDK_CONTROL_MASK, &zoom_out);
 	add_menu_item(menu, "_Normal size", "zoom-original", GDK_equal, GDK_CONTROL_MASK, &zoom_original);
-	gtk_accel_group_connect(accelgroup, GDK_0, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE,
+	gtk_accel_group_connect(accelgroup, GDK_0, GDK_CONTROL_MASK, 0,
 	                        g_cclosure_new(G_CALLBACK(&zoom_original_accel), NULL, NULL));
-	gtk_accel_group_connect(accelgroup, GDK_1, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE,
+	gtk_accel_group_connect(accelgroup, GDK_1, GDK_CONTROL_MASK, 0,
 	                        g_cclosure_new(G_CALLBACK(&zoom_original_accel), NULL, NULL));
 
 	menu = add_menu(menubar, "_Go");
@@ -427,9 +743,9 @@ create_window(void)
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 	nextgroup = add_menu_item(menu, "N_ext "DEFAULT_LISTING_TYPE, "go-down", GDK_n, GDK_CONTROL_MASK | GDK_SHIFT_MASK, &go_down);
 	prevgroup = add_menu_item(menu, "P_revious "DEFAULT_LISTING_TYPE, "go-up", GDK_p, GDK_CONTROL_MASK | GDK_SHIFT_MASK, &go_up);
-	gtk_accel_group_connect(accelgroup, GDK_Down, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE,
+	gtk_accel_group_connect(accelgroup, GDK_Down, GDK_CONTROL_MASK, 0,
 	                        g_cclosure_new(G_CALLBACK(&go_down_accel), NULL, NULL));
-	gtk_accel_group_connect(accelgroup, GDK_Up, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE,
+	gtk_accel_group_connect(accelgroup, GDK_Up, GDK_CONTROL_MASK, 0,
 	                        g_cclosure_new(G_CALLBACK(&go_up_accel), NULL, NULL));
 
 	hbox = gtk_hbox_new(FALSE, 4);
@@ -486,17 +802,21 @@ create_window(void)
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_ETCHED_IN);
 	store = gtk_list_store_new(1, G_TYPE_STRING);
 	populate_scripts(store);
-	treeview = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+	grouplist = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
 	renderer = gtk_cell_renderer_text_new();
 	column = gtk_tree_view_column_new_with_attributes(NULL, renderer, "text", 0, NULL);
-	gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
-	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(treeview), FALSE);
-	gtk_container_add(GTK_CONTAINER(scrolled), treeview);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(grouplist), column);
+	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(grouplist), FALSE);
+	g_signal_connect(grouplist, "query-tooltip", G_CALLBACK(&grouplist_query_tooltip), NULL);
+	gtk_widget_set_has_tooltip(GTK_WIDGET(grouplist), TRUE);
+	gtk_container_add(GTK_CONTAINER(scrolled), grouplist);
 	gtk_box_pack_start(GTK_BOX(left), scrolled, TRUE, TRUE, 0);
 
 	g_signal_connect(G_OBJECT(listcombo), "changed", G_CALLBACK(&listcombo_changed), store);
 
 	notebook = gtk_notebook_new();
+	gtk_notebook_set_scrollable(GTK_NOTEBOOK(notebook), TRUE);
+	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_TOP);
 
 	/* TODO character map tab pane (should have focus: gtk_widget_grab_focus(GTK_WIDGET(...)) */
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
@@ -505,11 +825,35 @@ create_window(void)
 	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _table"));
 
+#ifdef TODO
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
 	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _details"));
+#endif
+
+#ifdef TODO
+	scrolled = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Glyph v_ariants"));
+#endif
+
+#ifdef TODO
+	scrolled = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Font c_omparison"));
+#endif
+
+	n = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebook));
+	for (i = 1; i <= n && i <= 9; i++) {
+		closure = g_cclosure_new(G_CALLBACK(&select_page_accel), NULL, NULL);
+		gtk_accel_group_connect(accelgroup, GDK_0 + (unsigned)i, GDK_MOD1_MASK, GTK_ACCEL_LOCKED, closure);
+	}
 
 	hbox = gtk_hpaned_new();
 	gtk_paned_pack1(GTK_PANED(hbox), left, FALSE, TRUE);
@@ -691,8 +1035,10 @@ main(int argc, char *argv[])
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bold), TRUE);
 	if (use_italic)
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(italic), TRUE);
+	groups_tooltips = group_tooltips[listing];
+	ngroups_tooltips = ngroup_tooltips[listing];
 
-	/* TODO select font family */
+	(void) font_family; /* TODO select font family */
 	/* TODO select character (U+0000) and group (locate the on containing it, go to All if not found) */
 
 	gtk_window_present(GTK_WINDOW(window));
