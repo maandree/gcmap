@@ -65,9 +65,9 @@ populate_font_families(GtkWidget *widget, GtkListStore *store)
 
 	pango_context_list_families(gtk_widget_get_pango_context(GTK_WIDGET(widget)), &families, &nfamilies_int);
 	nfamilies = (size_t)nfamilies_int;
-	names = calloc(nfamilies, sizeof(*names));
+	names = ecalloc(nfamilies, sizeof(*names));
 
-	for (i = 0; i < nfamilies; i++)
+	for (i = 0u; i < nfamilies; i++)
 		names[i] = pango_font_family_get_name(families[i]);
 	libsimple_qsort_str(names, nfamilies);
 	for (i = 0; i < nfamilies; i++) {
@@ -107,7 +107,7 @@ grouplist_query_tooltip(GtkWidget *widget, int x, int y, int keyboard_mode,
 			return 0;
 	}
 
-	index = gtk_tree_path_get_indices(path)[0];
+	index = gtk_tree_path_get_indices(path)[0u];
 	if (index < 0 || (size_t)index >= ngroups_tooltips) {
 		gtk_tree_path_free(path);
 		return 0;
@@ -123,29 +123,29 @@ grouplist_query_tooltip(GtkWidget *widget, int x, int y, int keyboard_mode,
 static char *
 script_tooltip(const struct libcmap_script *script)
 {
-	size_t i, len, off = 0;
+	size_t i, len, off = 0u;
 	int r;
 	char *ret;
 
 	if (!script->nranges)
 		return NULL;
 
-	len = strlen(script->name) + 1U;
-	for (i = 0; i < script->nranges; i++) {
+	len = strlen(script->name) + 1u;
+	for (i = 0u; i < script->nranges; i++) {
 		r = libcmap_sprint_range(NULL, &script->ranges[i], NULL);
 		if (r < 0)
 			return NULL;
-		len += (size_t)r + 2U;
+		len += (size_t)r + 2u;
 	}
 
-	ret = malloc((size_t)len + 1U);
+	ret = malloc((size_t)len + 1u);
 	if (!ret)
 		return NULL;
 
 	off = (size_t)(stpcpy(ret, script->name) - ret);
 	ret[off++] = ' ';
 	ret[off++] = '(';
-	for (i = 0; i < script->nranges; i++) {
+	for (i = 0u; i < script->nranges; i++) {
 		if (i) {
 			ret[off++] = ',';
 			ret[off++] = ' ';
@@ -203,21 +203,21 @@ populate_scripts(GtkListStore *store)
 
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "All", -1);
-	for (i = 0; i < n; i++) {
+	for (i = 0u; i < n; i++) {
 		gtk_list_store_append(store, &iter);
 		gtk_list_store_set(store, &iter, 0, list[i].name, -1);
 	}
 
 #ifdef HAVE_ITEM_TOOLTIPS
 	if (!group_tooltips[BY_SCRIPT]) {
-		ngroup_tooltips[BY_SCRIPT] = n + 1U;
-		group_tooltips[BY_SCRIPT] = calloc(ngroup_tooltips[BY_SCRIPT], sizeof(**group_tooltips));
-		group_tooltips[BY_SCRIPT][0] = block_tooltip(&all_block);
-		for (i = 0; i < n; i++) {
+		ngroup_tooltips[BY_SCRIPT] = n + 1u;
+		group_tooltips[BY_SCRIPT] = ecalloc(ngroup_tooltips[BY_SCRIPT], sizeof(**group_tooltips));
+		group_tooltips[BY_SCRIPT][0u] = block_tooltip(&all_block);
+		for (i = 0u; i < n; i++) {
 			if (!strcmp(list[i].name, "Unknown"))
-				group_tooltips[BY_SCRIPT][i + 1U] = "Unknown (Codepoints not assigned any script)";
+				group_tooltips[BY_SCRIPT][i + 1u] = "Unknown (Codepoints not assigned any script)";
 			else
-				group_tooltips[BY_SCRIPT][i + 1U] = script_tooltip(&list[i]);
+				group_tooltips[BY_SCRIPT][i + 1u] = script_tooltip(&list[i]);
 		}
 	}
 	groups_tooltips = group_tooltips[BY_SCRIPT];
@@ -235,7 +235,7 @@ populate_blocks(GtkListStore *store)
 
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "All", -1);
-	for (i = 0; i < n; i++) {
+	for (i = 0u; i < n; i++) {
 		gtk_list_store_append(store, &iter);
 		gtk_list_store_set(store, &iter, 0, list[i].name, -1);
 	}
@@ -244,12 +244,12 @@ populate_blocks(GtkListStore *store)
 
 #ifdef HAVE_ITEM_TOOLTIPS
 	if (!group_tooltips[BY_BLOCK]) {
-		ngroup_tooltips[BY_BLOCK] = n + 2U;
-		group_tooltips[BY_BLOCK] = calloc(ngroup_tooltips[BY_BLOCK], sizeof(**group_tooltips));
-		group_tooltips[BY_BLOCK][0] = block_tooltip(&all_block);
-		group_tooltips[BY_BLOCK][n + 1U] = "No Block (Codepoints not assigned any block)";
-		for (i = 0; i < n; i++)
-			group_tooltips[BY_BLOCK][i + 1U] = block_tooltip(&list[i]);
+		ngroup_tooltips[BY_BLOCK] = n + 2u;
+		group_tooltips[BY_BLOCK] = ecalloc(ngroup_tooltips[BY_BLOCK], sizeof(**group_tooltips));
+		group_tooltips[BY_BLOCK][0u] = block_tooltip(&all_block);
+		group_tooltips[BY_BLOCK][n + 1u] = "No Block (Codepoints not assigned any block)";
+		for (i = 0u; i < n; i++)
+			group_tooltips[BY_BLOCK][i + 1u] = block_tooltip(&list[i]);
 	}
 	groups_tooltips = group_tooltips[BY_BLOCK];
 	ngroups_tooltips = ngroup_tooltips[BY_BLOCK];
@@ -261,7 +261,7 @@ static void
 copytext_changed(GtkEditable *editable, GtkWidget *button)
 {
 	const char *text = gtk_entry_get_text(GTK_ENTRY(editable));
-	gtk_widget_set_sensitive(button, !!text[0]);
+	gtk_widget_set_sensitive(button, !!text[0u]);
 }
 
 
@@ -885,10 +885,10 @@ maybe_sat_parse_int_as_uint(const char *s, unsigned int *out, int *setp)
 	*setp = 1;
 	for (; isdigit(*s); s++) {
 		digit = (unsigned int)(*s & 15);
-		if (*out > ((unsigned int)INT_MAX - digit) / 10U)
+		if (*out > ((unsigned int)INT_MAX - digit) / 10u)
 			*out = (unsigned int)INT_MAX;
 		else
-			*out = *out * 10U + digit;
+			*out = *out * 10u + digit;
 	}
 	return s;
 }
