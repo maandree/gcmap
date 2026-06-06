@@ -941,7 +941,7 @@ main(int argc, char *argv[])
 	int default_font_size_set = 0;
 	int min_font_size_set = 0;
 	int max_font_size_set = 0;
-	const char *font_family = "sans";
+	const char *font_family = "Sans";
 
 	ARGBEGIN {
 	case 'B':
