@@ -1,27 +1,8 @@
 /* See LICENSE file for copyright and license details. */
-#include <libsimple.h>
-#include <libsimple-arg.h>
-#include <libcmap.h>
-#if defined(__GNUC__)
-# pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-# pragma GCC diagnostic ignored "-Wstrict-prototypes"
-#endif
-#include <gtk/gtk.h>
-#include <gdk/gdkkeysyms.h>
-#if defined(__GNUC__)
-# pragma GCC diagnostic pop
-#endif
+#include "common.h"
 
 USAGE("[-f font-family] [-s [font-size][/[[min]-[max]]]] [-B | -S] [-bi]");
 
-
-#if GTK_CHECK_VERSION(2, 12, 0)
-# define HAVE_ITEM_TOOLTIPS
-#endif
-
-
-#define COMMA ,
 
 #define DEFAULT_LISTING_TYPE "script"
 #define LIST_LISTINGS(X, D)\
@@ -36,6 +17,9 @@ enum listing {
 
 #define NLISTINGS_X(...) (size_t)1
 #define NLISTINGS (LIST_LISTINGS(NLISTINGS_X, +))
+
+
+static const struct libcmap_block all_block = {.name = "All", .range = LIBCMAP_UNIVERSE_RANGE};
 
 static unsigned int min_font_size = 4;
 static unsigned int default_font_size = 22;
@@ -139,7 +123,6 @@ grouplist_query_tooltip(GtkWidget *widget, int x, int y, int keyboard_mode,
 static char *
 script_tooltip(const struct libcmap_script *script)
 {
-	unsigned long int low, high;
 	size_t i, len, off = 0;
 	int r;
 	char *ret;
@@ -149,9 +132,7 @@ script_tooltip(const struct libcmap_script *script)
 
 	len = strlen(script->name) + 1U;
 	for (i = 0; i < script->nranges; i++) {
-		low = (unsigned long int)script->ranges[i].first;
-		high = (unsigned long int)script->ranges[i].last;
-		r = snprintf(NULL, 0, "U+%04lX–U+%04lX", low, high);
+		r = libcmap_sprint_range(NULL, &script->ranges[i], NULL);
 		if (r < 0)
 			return NULL;
 		len += (size_t)r + 2U;
@@ -161,14 +142,15 @@ script_tooltip(const struct libcmap_script *script)
 	if (!ret)
 		return NULL;
 
-	stpcpy(ret, script->name);
-	off = strlen(script->name);
+	off = (size_t)(stpcpy(ret, script->name) - ret);
 	ret[off++] = ' ';
 	ret[off++] = '(';
 	for (i = 0; i < script->nranges; i++) {
-		low = (unsigned long int)script->ranges[i].first;
-		high = (unsigned long int)script->ranges[i].last;
-		r = sprintf(&ret[off], "%sU+%04lX–U+%04lX", i ? ", " : "", low, high);
+		if (i) {
+			ret[off++] = ',';
+			ret[off++] = ' ';
+		}
+		r = libcmap_sprint_range(&ret[off], &script->ranges[i], NULL);
 		if (r < 0)
 			return NULL;
 		off += (size_t)r;
@@ -185,22 +167,25 @@ script_tooltip(const struct libcmap_script *script)
 static char *
 block_tooltip(const struct libcmap_block *block)
 {
-	unsigned long int low = (unsigned long int)block->range.first;
-	unsigned long int high = (unsigned long int)block->range.last;
 	int len, r;
-	char *ret;
+	char *ret, *p;
+	size_t size;
 
-	len = snprintf(NULL, 0, "%s (U+%04lX–U+%04lX)", block->name, low, high);
+	size = strlen(block->name) + sizeof(" ()");
+	len = libcmap_sprint_range(NULL, &block->range, NULL);
 	if (len < 0)
 		return NULL;
+	size += (size_t)len;
 
-	ret = malloc((size_t)len + 1U);
+	ret = malloc(size);
 	if (!ret)
 		return NULL;
 
-	r = sprintf(ret, "%s (U+%04lX–U+%04lX)", block->name, low, high);
+	p = stpcpy(stpcpy(ret, block->name), " (");
+	r = libcmap_sprint_range(p, &block->range, NULL);
 	if (r < 0 || r > len)
 		abort();
+	stpcpy(&p[r], ")");
 
 	return ret;
 }
@@ -227,7 +212,7 @@ populate_scripts(GtkListStore *store)
 	if (!group_tooltips[BY_SCRIPT]) {
 		ngroup_tooltips[BY_SCRIPT] = n + 1U;
 		group_tooltips[BY_SCRIPT] = calloc(ngroup_tooltips[BY_SCRIPT], sizeof(**group_tooltips));
-		group_tooltips[BY_SCRIPT][0] = "All (U+0000–U+10FFFF)";
+		group_tooltips[BY_SCRIPT][0] = block_tooltip(&all_block);
 		for (i = 0; i < n; i++) {
 			if (!strcmp(list[i].name, "Unknown"))
 				group_tooltips[BY_SCRIPT][i + 1U] = "Unknown (Codepoints not assigned any script)";
@@ -261,7 +246,7 @@ populate_blocks(GtkListStore *store)
 	if (!group_tooltips[BY_BLOCK]) {
 		ngroup_tooltips[BY_BLOCK] = n + 2U;
 		group_tooltips[BY_BLOCK] = calloc(ngroup_tooltips[BY_BLOCK], sizeof(**group_tooltips));
-		group_tooltips[BY_BLOCK][0] = "All (U+0000–U+10FFFF)";
+		group_tooltips[BY_BLOCK][0] = block_tooltip(&all_block);
 		group_tooltips[BY_BLOCK][n + 1U] = "No Block (Codepoints not assigned any block)";
 		for (i = 0; i < n; i++)
 			group_tooltips[BY_BLOCK][i + 1U] = block_tooltip(&list[i]);
@@ -299,7 +284,7 @@ fontcombo_changed(GtkComboBox *combo, void *user_data) /* TODO */
 	(void) user_data;
 	if (!gtk_combo_box_get_active_iter(combo, &iter))
                 return;
-	gtk_tree_model_get(GTK_TREE_MODEL(fontcombo_store), &iter,0, &family, -1);
+	gtk_tree_model_get(GTK_TREE_MODEL(fontcombo_store), &iter, 0, &family, -1);
 	if (!family)
                 return;
 }
@@ -764,7 +749,7 @@ create_window(void)
 	gtk_combo_box_set_focus_on_click(GTK_COMBO_BOX(fontcombo), FALSE);
 	gtk_box_pack_start(GTK_BOX(hbox), fontcombo, FALSE, FALSE, 0);
 	gtk_combo_box_set_active(GTK_COMBO_BOX(fontcombo), -1);
-	g_signal_connect(fontcombo, "changed", G_CALLBACK(fontcombo_changed), NULL);
+	g_signal_connect(fontcombo, "changed", G_CALLBACK(&fontcombo_changed), NULL);
 	accessible = gtk_widget_get_accessible(fontcombo);
 	atk_object_set_name(accessible, "Font family");
 
@@ -822,7 +807,7 @@ create_window(void)
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gcmap_char_table_new());
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _table"));
 
 #ifdef TODO
@@ -1017,18 +1002,18 @@ main(int argc, char *argv[])
 
 	gtk_init(&xargc, &xargv);
 	theme = gtk_icon_theme_get_default();
-	if (!gtk_icon_theme_has_icon(theme, icon = "apps/gcmap") ||
-	    !gtk_icon_theme_has_icon(theme, icon = "gcmap") ||
-	    !gtk_icon_theme_has_icon(theme, icon = "apps/accessories-character-map") ||
+	if (!gtk_icon_theme_has_icon(theme, icon = "apps/gcmap") &&
+	    !gtk_icon_theme_has_icon(theme, icon = "gcmap") &&
+	    !gtk_icon_theme_has_icon(theme, icon = "apps/accessories-character-map") &&
 	    !gtk_icon_theme_has_icon(theme, icon = "accessories-character-map"))
 		icon = "gcmap";
 	gtk_window_set_default_icon_name(icon);
 
 	create_window();
 	gtk_window_set_icon_name(GTK_WINDOW(window), icon);
+	gtk_window_set_wmclass(GTK_WINDOW(window), "gcmap", "gcmap");
+	gtk_window_set_role(GTK_WINDOW(window), "gcmap");
 
-	if (gtk_combo_box_get_active(GTK_COMBO_BOX(listcombo)) != (int)listing)
-		gtk_combo_box_set_active(GTK_COMBO_BOX(listcombo), (int)listing);
 	if (gtk_combo_box_get_active(GTK_COMBO_BOX(listcombo)) != (int)listing)
 		gtk_combo_box_set_active(GTK_COMBO_BOX(listcombo), (int)listing);
 	if (use_bold)

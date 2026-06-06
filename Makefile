@@ -4,9 +4,12 @@ CONFIGFILE = config.mk
 include $(CONFIGFILE)
 
 OBJ =\
-	gcmap.o
+	gcmap.o\
+	char-table.o
 
-HDR =
+HDR =\
+	common.h\
+	char-table.h
 
 all: gcmap
 $(OBJ): $(HDR)
