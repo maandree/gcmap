@@ -3,7 +3,7 @@
 
 
 #define GCMAP_TYPE_CHAR_TABLE            (gcmap_char_table_get_type())
-#define GCMAP_TYPE_CHAR(OBJ)             (G_TYPE_CHECK_INSTANCE_CAST((OBJ), GCMAP_TYPE_CHAR_TABLE, CharTable))
+#define GCMAP_CHAR_TABLE(OBJ)            (G_TYPE_CHECK_INSTANCE_CAST((OBJ), GCMAP_TYPE_CHAR_TABLE, CharTable))
 #define GCMAP_CHAR_TABLE_CLASS(CLASS)    (G_TYPE_CHECK_CLASS_CAST((CLASS), GCMAP_TYPE_CHAR_TABLE, CharTableClass))
 #define IS_GCMAP_CHAR_TABLE(OBJ)         (G_TYPE_CHECK_INSTANCE_TYPE((OBJ), GCMAP_TYPE_CHAR_TABLE))
 #define IS_GCMAP_CHAR_TABLE_CLASS(CLASS) (G_TYPE_CHECK_CLASS_TYPE((CLASS), GCMAP_TYPE_CHAR_TABLE))
@@ -12,9 +12,18 @@
 
 typedef struct _CharTable {
 	GtkDrawingArea parent_instance;
-	int nrows, ncols, max_w, max_h;
+	int nrows, ncols;
+	int max_w, max_h;
+	int cell_h, table_h;
+	uint32_t nchars;
+	int viewport_w, viewport_h;
 	PangoFontDescription *font;
 	PangoLayout *layout;
+	int font_size;
+	PangoWeight font_weight;
+	PangoStyle font_style;
+	const struct libcmap_range *ranges;
+	size_t nranges;
 } CharTable;
 
 typedef struct _CharTableClass {
@@ -23,4 +32,11 @@ typedef struct _CharTableClass {
 
 
 GType gcmap_char_table_get_type(void);
-GtkWidget *gcmap_char_table_new(void);
+GtkWidget *gcmap_char_table_new(const char *font_family, int font_size, PangoWeight font_weight, PangoStyle font_style);
+
+void gcmap_char_table_set_font_family(CharTable *this, const char *family);
+void gcmap_char_table_set_font_weight(CharTable *this, PangoWeight weight);
+void gcmap_char_table_set_font_style(CharTable *this, PangoStyle style);
+void gcmap_char_table_set_font_size(CharTable *this, int size);
+void gcmap_char_table_set_ranges(CharTable *this, const struct libcmap_range *ranges, size_t nranges);
+void gcmap_char_table_viewport_updated(CharTable *this, int viewport_w, int viewport_h);

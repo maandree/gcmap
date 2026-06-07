@@ -4,6 +4,9 @@
 USAGE("[-f font-family] [-s [font-size][/[[min]-[max]]]] [-B | -S] [-bi]");
 
 
+#define DEFAULT_FONT_FAMILY "Sans"
+
+
 #define DEFAULT_LISTING_TYPE "script"
 #define LIST_LISTINGS(X, D)\
 	X(BY_SCRIPT, "By _script", DEFAULT_LISTING_TYPE, by_script_selected, populate_scripts, GDK_s) D\
@@ -41,6 +44,7 @@ static GtkWidget *nextgroup;
 static GtkWidget *prevgroup;
 static GtkWidget *bylisting[NLISTINGS];
 static GtkWidget *vtabtext;
+static GtkWidget *chartable;
 static GtkListStore *fontcombo_store;
 static GtkAdjustment *fontsize_adjustment;
 static GtkAccelGroup *accelgroup;
@@ -54,17 +58,21 @@ static size_t ngroups_tooltips;
 #endif
 
 
-static void
-populate_font_families(GtkWidget *widget, GtkListStore *store)
+static int
+populate_font_families(GtkWidget *widget, GtkListStore *store, const char **selectedp)
 {
 	const char **names;
 	PangoFontFamily **families;
 	int nfamilies_int;
 	size_t i, nfamilies;
 	GtkTreeIter iter;
+	size_t selected_index = SIZE_MAX;
+	size_t default_index = SIZE_MAX;
 
 	pango_context_list_families(gtk_widget_get_pango_context(GTK_WIDGET(widget)), &families, &nfamilies_int);
 	nfamilies = (size_t)nfamilies_int;
+	if (nfamilies == 0u)
+		eprintf("no fonts available");
 	names = ecalloc(nfamilies, sizeof(*names));
 
 	for (i = 0u; i < nfamilies; i++)
@@ -73,10 +81,22 @@ populate_font_families(GtkWidget *widget, GtkListStore *store)
 	for (i = 0; i < nfamilies; i++) {
 		gtk_list_store_append(store, &iter);
 		gtk_list_store_set(store, &iter, 0, names[i], -1);
+		if (selected_index == SIZE_MAX && !strcasecmp(names[i], *selectedp))
+			selected_index = i;
+		if (default_index == SIZE_MAX && !strcasecmp(names[i], DEFAULT_FONT_FAMILY))
+			default_index = i;
 	}
+
+	if (selected_index == SIZE_MAX)
+		selected_index = default_index;
+	if (selected_index == SIZE_MAX)
+		selected_index = 0u;
+	*selectedp = names[selected_index];
 
 	free(names);
 	g_free(families);
+
+	return (int)selected_index;
 }
 
 
@@ -195,6 +215,46 @@ block_tooltip(const struct libcmap_block *block)
 
 
 static void
+grouplist_selection_changed(GtkTreeSelection *selection, void *user_data)
+{
+	const struct libcmap_range *ranges = &all_block.range;
+	size_t nranges = 1u;
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	GtkTreePath *path;
+	int index;
+
+	(void) user_data;
+
+	if (!gtk_tree_selection_get_selected(selection, &model, &iter))
+		return;
+
+	path = gtk_tree_model_get_path(model, &iter);
+	index = gtk_tree_path_get_indices(path)[0u];
+	gtk_tree_path_free(path);
+
+	switch (gtk_combo_box_get_active(GTK_COMBO_BOX(listcombo))) {
+	case BY_SCRIPT:
+		if (index-- > 0 && (size_t)index < libcmap_script_list_size) {
+			ranges = libcmap_script_list[index].ranges;
+			nranges = libcmap_script_list[index].nranges;
+		}
+		break;
+
+	case BY_BLOCK:
+		if (index-- > 0 && (size_t)index < libcmap_block_list_size)
+			ranges = &libcmap_block_list[index].range;
+		break;
+
+	default:
+		abort();
+	}
+
+	gcmap_char_table_set_ranges(GCMAP_CHAR_TABLE(chartable), ranges, nranges);
+}
+
+
+static void
 populate_scripts(GtkListStore *store)
 {
 	const struct libcmap_script *list = libcmap_script_list;
@@ -277,7 +337,7 @@ copybutton_clicked(GtkWidget *button, GtkEditable *editable)
 
 
 static void
-fontcombo_changed(GtkComboBox *combo, void *user_data) /* TODO */
+fontcombo_changed(GtkComboBox *combo, void *user_data)
 {
 	GtkTreeIter iter;
 	char *family;
@@ -287,24 +347,27 @@ fontcombo_changed(GtkComboBox *combo, void *user_data) /* TODO */
 	gtk_tree_model_get(GTK_TREE_MODEL(fontcombo_store), &iter, 0, &family, -1);
 	if (!family)
 		return;
+	gcmap_char_table_set_font_family(GCMAP_CHAR_TABLE(chartable), family);
 }
 
 
 static void
-bold_toggled(GtkToggleButton *button, void *user_data) /* TODO */
+bold_toggle(GtkToggleButton *button, void *user_data)
 {
 	int selected = gtk_toggle_button_get_active(button);
-	(void) selected;
 	(void) user_data;
+	gcmap_char_table_set_font_weight(GCMAP_CHAR_TABLE(chartable),
+	                                 selected ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
 }
 
 
 static void
-italic_toggled(GtkToggleButton *button, void *user_data) /* TODO */
+italic_toggle(GtkToggleButton *button, void *user_data)
 {
 	int selected = gtk_toggle_button_get_active(button);
-	(void) selected;
 	(void) user_data;
+	gcmap_char_table_set_font_style(GCMAP_CHAR_TABLE(chartable),
+	                                selected ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
 }
 
 
@@ -313,7 +376,7 @@ fontsize_changed(GtkAdjustment *adjustment, void *user_data)
 {
 	double size = gtk_adjustment_get_value(adjustment);
 	(void) user_data;
-	(void) size; /* TODO apply font size */
+	gcmap_char_table_set_font_size(GCMAP_CHAR_TABLE(chartable), (int)size);
 }
 
 
@@ -665,9 +728,17 @@ vtabtext_changed(GtkWidget *menu_item, void *user_data)
 
 
 static void
-create_window(void)
+chartable_viewport_size_allocate(GtkWidget *viewport, GtkAllocation *allocation, void *user_data) {
+	(void) user_data;
+	(void) viewport;
+	gcmap_char_table_viewport_updated(GCMAP_CHAR_TABLE(chartable), allocation->width, allocation->height);
+}
+
+
+static void
+create_window(const char *default_font, PangoWeight default_weight, PangoStyle default_style)
 {
-	GtkWidget *vbox, *hbox, *left, *scrolled;
+	GtkWidget *vbox, *hbox, *left, *scrolled, *viewport;
 	GtkWidget *label, *copybutton, *align, *menubar, *menu;
 	GtkListStore *store;
 	GtkCellRenderer *renderer;
@@ -676,7 +747,7 @@ create_window(void)
 	AtkObject *accessible;
 	GClosure *closure;
 	GSList *group;
-	int i, n;
+	int i, n, default_font_index;
 
 	window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	g_signal_connect(window, "destroy", G_CALLBACK(&gtk_main_quit), NULL);
@@ -745,10 +816,10 @@ create_window(void)
 	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(fontcombo), renderer, "text", 0, NULL);
 	fontcombo_store = gtk_list_store_new(1, G_TYPE_STRING);
 	gtk_combo_box_set_model(GTK_COMBO_BOX(fontcombo), GTK_TREE_MODEL(fontcombo_store));
-	populate_font_families(fontcombo, fontcombo_store);
+	default_font_index = populate_font_families(fontcombo, fontcombo_store, &default_font);
 	gtk_combo_box_set_focus_on_click(GTK_COMBO_BOX(fontcombo), FALSE);
 	gtk_box_pack_start(GTK_BOX(hbox), fontcombo, FALSE, FALSE, 0);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(fontcombo), -1);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(fontcombo), default_font_index);
 	g_signal_connect(fontcombo, "changed", G_CALLBACK(&fontcombo_changed), NULL);
 	accessible = gtk_widget_get_accessible(fontcombo);
 	atk_object_set_name(accessible, "Font family");
@@ -756,13 +827,13 @@ create_window(void)
 	bold = gtk_toggle_button_new_with_mnemonic(GTK_STOCK_BOLD);
 	gtk_button_set_use_stock(GTK_BUTTON(bold), TRUE);
 	gtk_button_set_focus_on_click(GTK_BUTTON(bold), FALSE);
-	g_signal_connect(bold, "toggled", G_CALLBACK(&bold_toggled), NULL);
+	g_signal_connect(bold, "toggled", G_CALLBACK(&bold_toggle), NULL);
 	gtk_box_pack_start(GTK_BOX(hbox), bold, FALSE, FALSE, 0);
 
 	italic = gtk_toggle_button_new_with_mnemonic(GTK_STOCK_ITALIC);
 	gtk_button_set_use_stock(GTK_BUTTON(italic), TRUE);
 	gtk_button_set_focus_on_click(GTK_BUTTON(italic), FALSE);
-	g_signal_connect(italic, "toggled", G_CALLBACK(&italic_toggled), NULL);
+	g_signal_connect(italic, "toggled", G_CALLBACK(&italic_toggle), NULL);
 	gtk_box_pack_start(GTK_BOX(hbox), italic, FALSE, FALSE, 0);
 
 	obj = gtk_adjustment_new(default_font_size, min_font_size, max_font_size,
@@ -794,6 +865,8 @@ create_window(void)
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(grouplist), FALSE);
 	g_signal_connect(grouplist, "query-tooltip", G_CALLBACK(&grouplist_query_tooltip), NULL);
 	gtk_widget_set_has_tooltip(GTK_WIDGET(grouplist), TRUE);
+	g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(grouplist)), "changed",
+	                 G_CALLBACK(&grouplist_selection_changed), NULL);
 	gtk_container_add(GTK_CONTAINER(scrolled), grouplist);
 	gtk_box_pack_start(GTK_BOX(left), scrolled, TRUE, TRUE, 0);
 
@@ -805,16 +878,20 @@ create_window(void)
 
 	/* TODO character map tab pane (should have focus: gtk_widget_grab_focus(GTK_WIDGET(...)) */
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
-	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gcmap_char_table_new());
+	chartable = gcmap_char_table_new(default_font, (int)default_font_size, default_weight, default_style);
+	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(scrolled), chartable);
+	viewport = gtk_bin_get_child(GTK_BIN(scrolled));
+	g_signal_connect(viewport, "size-allocate", G_CALLBACK(&chartable_viewport_size_allocate), NULL);
+	/* TODO scroll shall snap to beginning of a row */
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _table"));
 
 #ifdef TODO
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO")); // gtk_scrolled_window_add_with_viewport
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _details"));
 #endif
 
@@ -822,7 +899,7 @@ create_window(void)
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO")); // gtk_scrolled_window_add_with_viewport
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Glyph v_ariants"));
 #endif
 
@@ -830,7 +907,7 @@ create_window(void)
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO")); // gtk_scrolled_window_add_with_viewport
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Font c_omparison"));
 #endif
 
@@ -941,7 +1018,7 @@ main(int argc, char *argv[])
 	int default_font_size_set = 0;
 	int min_font_size_set = 0;
 	int max_font_size_set = 0;
-	const char *font_family = "Sans";
+	const char *font_family = DEFAULT_FONT_FAMILY;
 
 	ARGBEGIN {
 	case 'B':
@@ -1009,7 +1086,9 @@ main(int argc, char *argv[])
 		icon = "gcmap";
 	gtk_window_set_default_icon_name(icon);
 
-	create_window();
+	create_window(font_family,
+	              use_bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL,
+	              use_italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
 	gtk_window_set_icon_name(GTK_WINDOW(window), icon);
 	gtk_window_set_wmclass(GTK_WINDOW(window), "gcmap", "gcmap");
 	gtk_window_set_role(GTK_WINDOW(window), "gcmap");
@@ -1023,8 +1102,7 @@ main(int argc, char *argv[])
 	groups_tooltips = group_tooltips[listing];
 	ngroups_tooltips = ngroup_tooltips[listing];
 
-	(void) font_family; /* TODO select font family */
-	/* TODO select character (U+0000) and group (locate the on containing it, go to All if not found) */
+	/* TODO select character (U+0000) and group (locate the one containing it, go to All if not found) */
 
 	gtk_window_present(GTK_WINDOW(window));
 	gtk_main();
