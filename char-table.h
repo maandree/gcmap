@@ -12,6 +12,9 @@
 
 typedef struct _CharTable {
 	GtkDrawingArea parent_instance;
+	int nrows, ncols, max_w, max_h;
+	PangoFontDescription *font;
+	PangoLayout *layout;
 } CharTable;
 
 typedef struct _CharTableClass {

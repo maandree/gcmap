@@ -5,7 +5,8 @@ include $(CONFIGFILE)
 
 OBJ =\
 	gcmap.o\
-	char-table.o
+	char-table.o\
+	colour.o
 
 HDR =\
 	common.h\
