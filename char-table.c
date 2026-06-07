@@ -162,6 +162,7 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 	cp = this->ranges[range].first;
 	skip = (size_t)r0 * (size_t)this->ncols + (size_t)c0;
 	row_skip = (size_t)this->ncols - (size_t)(c1 - c0);
+	/* TODO scroll makes the lines jump by a pixel */
 	for (r = r0; r < r1; r++, y0 = y1, skip = row_skip) {
 		while (skip) {
 			size_t max_jump = (size_t)(this->ranges[range].last - cp + 1u);
@@ -194,6 +195,22 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 out:
 	cairo_destroy(g);
 	return FALSE;
+}
+
+
+static void
+update_adjustment(CharTable *this)
+{
+	uint32_t nrows_total;
+	nrows_total = this->nchars + (uint32_t)this->ncols - 1u;
+	nrows_total /= (uint32_t)this->nrows;
+	/* TODO
+	if (!this->adjustment)
+		return;
+	gtk_adjustment_set_upper(this->adjustment, (double)nrows_total);
+	gtk_adjustment_set_page_increment(this->adjustment, this->nrows);
+	gtk_adjustment_set_page_size(this->adjustment, this->nrows);
+	*/
 }
 
 
@@ -236,7 +253,10 @@ update_cell_size(GtkWidget *widget, int ranges_changed)
 	nchars = (uint32_t)this->nranges;
 	for (i = 0u; i < this->nranges; i++)
 		nchars += this->ranges[i].last - this->ranges[i].first;
-	this->nchars = nchars;
+	if (this->nchars != nchars) {
+		this->nchars = nchars;
+		update_adjustment(this);
+	}
 	table_h = (int)(nchars / (uint32_t)this->ncols);
 	if (nchars % (uint32_t)this->ncols)
 		table_h += 1;
@@ -276,6 +296,8 @@ gcmap_char_table_init(CharTable *this)
 	this->cell_h = 1;
 	this->table_h = 1;
 	this->nchars = 0u;
+	this->ranges = NULL;
+	this->nranges = 0u;
 	this->viewport_w = 1;
 	this->viewport_h = 1;
 
@@ -410,8 +432,6 @@ gcmap_char_table_new(const char *font_family, int font_size, PangoWeight font_we
 	this->font_size = font_size;
 	this->font_weight = font_weight;
 	this->font_style = font_style;
-	this->ranges = NULL;
-	this->nranges = 0u;
 
 	this->font = pango_font_description_new();
 	if (!this->font)
