@@ -283,10 +283,10 @@ fontcombo_changed(GtkComboBox *combo, void *user_data) /* TODO */
 	char *family;
 	(void) user_data;
 	if (!gtk_combo_box_get_active_iter(combo, &iter))
-                return;
+		return;
 	gtk_tree_model_get(GTK_TREE_MODEL(fontcombo_store), &iter, 0, &family, -1);
 	if (!family)
-                return;
+		return;
 }
 
 
@@ -933,7 +933,7 @@ main(int argc, char *argv[])
 	GtkIconTheme *theme;
 	const char *icon;
 	int xargc = 1;
-        char *xargva[] = {argv[0], NULL};
+	char *xargva[] = {argv[0], NULL};
 	char **xargv = xargva;
 	enum listing listing = (enum listing)0;
 	int use_bold = 0;
@@ -1027,5 +1027,5 @@ main(int argc, char *argv[])
 	/* TODO select character (U+0000) and group (locate the on containing it, go to All if not found) */
 
 	gtk_window_present(GTK_WINDOW(window));
-        gtk_main();
+	gtk_main();
 }
