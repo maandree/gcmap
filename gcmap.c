@@ -25,7 +25,7 @@ enum listing {
 static const struct libcmap_block all_block = {.name = "All", .range = LIBCMAP_UNIVERSE_RANGE};
 
 static unsigned int min_font_size = 4;
-static unsigned int default_font_size = 22;
+static unsigned int default_font_size = 14;
 static unsigned int max_font_size = 500;
 static unsigned int small_font_size_increment = 1;
 static unsigned int big_font_size_increment = 8;
