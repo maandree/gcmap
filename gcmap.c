@@ -242,8 +242,12 @@ grouplist_selection_changed(GtkTreeSelection *selection, void *user_data)
 		break;
 
 	case BY_BLOCK:
-		if (index-- > 0 && (size_t)index < libcmap_block_list_size)
+		if (index-- > 0 && (size_t)index < libcmap_block_list_size) {
 			ranges = &libcmap_block_list[index].range;
+		} else if ((size_t)index == libcmap_block_list_size) {
+			ranges = libcmap_no_block.ranges;
+			nranges = libcmap_no_block.nranges;
+		}
 		break;
 
 	default:
