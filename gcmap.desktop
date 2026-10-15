@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=gcmap
+Comment=Find and insert unusual characters
+Exec=gcmap %F
+Icon=accessories-character-map
+Terminal=false
+Categories=Accessories;Utility;

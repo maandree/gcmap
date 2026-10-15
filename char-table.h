@@ -14,7 +14,7 @@ typedef struct _CharTable {
 	GtkDrawingArea parent_instance;
 	int nrows, ncols;
 	int max_w, max_h;
-	int cell_h, table_h;
+	int cell_h;
 	uint32_t nchars;
 	int viewport_w, viewport_h;
 	PangoFontDescription *font;

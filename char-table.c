@@ -7,6 +7,12 @@
 #define CELL_X_CLEARANCE    2
 #define CELL_Y_CLEARANCE    2
 
+struct cells {
+	int r0, c0; /* inclusive */
+	int r1, c1; /* exclusive */
+	int r_off;
+};
+
 G_DEFINE_TYPE(CharTable, gcmap_char_table, GTK_TYPE_DRAWING_AREA)
 
 
@@ -97,29 +103,46 @@ fit_text(CharTable *this, const char *text, int *text_w_out, int *text_h_out)
 }
 
 
-static gboolean
-gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
+static void
+get_exposed_cells(GtkWidget *widget, GdkEventExpose *event, struct cells *cells_out)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
 	GdkRectangle area = event->area;
-	int r0 = MAX(area.y * this->nrows / this->viewport_h, 0);
-	int c0 = MAX(area.x * this->ncols / this->viewport_w, 0);
-	int r1 = MIN((area.y + area.height - 1) * this->nrows / this->viewport_h + 1, r0 + this->nrows);
-	int c1 = MIN((area.x + area.width  - 1) * this->ncols / this->viewport_w + 1, c0 + this->ncols);
+	LogicalScrollPane *scrolls = LOGICAL_SCROLL_PANE(gtk_widget_get_parent(widget));
+	GtkAdjustment *vadjustment = logical_scroll_pane_get_vadjustment(scrolls);
+
+	cells_out->r0 = area.y * this->nrows / this->viewport_h;
+	cells_out->c0 = area.x * this->ncols / this->viewport_w;
+	cells_out->r1 = (area.y + area.height - 1) * this->nrows / this->viewport_h + 1;
+	cells_out->c1 = (area.x + area.width  - 1) * this->ncols / this->viewport_w + 1;
+
+	cells_out->r0 = MAX(cells_out->r0, 0);
+	cells_out->c0 = MAX(cells_out->c0, 0);
+	cells_out->r1 = MIN(cells_out->r1, cells_out->r0 + this->nrows);
+	cells_out->c1 = MIN(cells_out->c1, cells_out->c0 + this->ncols);
+
+	cells_out->r_off = MAX((int)vadjustment->value, 0);
+}
+
+
+static gboolean
+gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
+{
+	struct cells cells;
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	GdkRectangle area = event->area;
 	GtkStyle *style = gtk_widget_get_style(widget);
 	cairo_t *g;
 	char text[16];
-	int r, c, x0, x1, y0, y1;
-	int text_w, text_h;
-	size_t skip, range, row_skip;
+	int r, c, x0, x1, y0, y1, text_w, text_h;
+	size_t skip, range, row_skip, max_jump, jump;
 	uint32_t cp;
+
+	get_exposed_cells(widget, event, &cells);
 
 	g = gdk_cairo_create(widget->window);
 	if (!g)
 		eprintf("gdk_cairo_create:");
-
-	/* Make sure it still looks good even if starting in the middle of row */
-	r1 += 1;
 
 	/* Configure drawing area */
 	gdk_cairo_rectangle(g, &area);
@@ -129,44 +152,47 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 	set_source_colour(g, &style->base[GTK_STATE_NORMAL]);
 	cairo_paint(g);
 
+	r = cells.r0;
+	c = cells.c0;
+	if (this->nranges == 0u)
+		goto out;
+
 	/* Draw grid lines */
-	set_source_colour_blend(g, &style->base[GTK_STATE_NORMAL], 0.10, &style->text[GTK_STATE_NORMAL]);
+	set_source_colour_blend(g, &style->base[GTK_STATE_NORMAL], 0.05, &style->text[GTK_STATE_NORMAL]);
 	cairo_set_line_width(g, 1.0);
 	/* horizontal */
-	y0 = this->viewport_h * (r0 + 1) / this->nrows;
-	x0 = this->viewport_w * c0 / this->ncols;
-	x1 = this->viewport_w * c1 / this->ncols;
-	for (r = r0 + (area.y > 0); r < r1; r++, y0 = y1) {
-		y1 = this->viewport_h * (r + 1) / this->nrows;
+	y0 = (this->viewport_h + 1) * (cells.r0 + 1) / this->nrows;
+	x0 = (this->viewport_w + 1) * cells.c0 / this->ncols;
+	x1 = (this->viewport_w + 1) * cells.c1 / this->ncols;
+	for (r = cells.r0 + (area.y > 0); r < cells.r1; r++, y0 = y1) {
+		y1 = (this->viewport_h + 1) * (r + 1) / this->nrows;
 		cairo_move_to(g, x0, y0 + 0.5);
 		cairo_line_to(g, x1, y0 + 0.5);
 		cairo_stroke(g);
 	}
 	/* vertical */
-	x0 = this->viewport_w * (c0 + 1) / this->ncols;
-	y0 = this->viewport_h * r0 / this->nrows;
-	y1 = this->viewport_h * r1 / this->nrows;
-	for (c = c0 + (area.x > 0); c < c1; c++, x0 = x1) {
-		x1 = this->viewport_w * (c + 1) / this->ncols;
+	x0 = (this->viewport_w + 1) * (cells.c0 + 1) / this->ncols;
+	y0 = (this->viewport_h + 1) * cells.r0 / this->nrows;
+	y1 = (this->viewport_h + 1) * cells.r1 / this->nrows;
+	for (c = cells.c0 + (area.x > 0); c < cells.c1; c++, x0 = x1) {
+		x1 = (this->viewport_w + 1) * (c + 1) / this->ncols;
 		cairo_move_to(g, x0 + 0.5, y0);
 		cairo_line_to(g, x0 + 0.5, y1);
 		cairo_stroke(g);
 	}
 
 	/* Draw gryphs */
-	if (this->nranges == 0u)
-		goto out;
 	set_source_colour(g, &style->text[GTK_STATE_NORMAL]);
-	y0 = this->viewport_h * r0 / this->nrows;
+	y0 = (this->viewport_h + 1) * cells.r0 / this->nrows;
 	range = 0u;
 	cp = this->ranges[range].first;
-	skip = (size_t)r0 * (size_t)this->ncols + (size_t)c0;
-	row_skip = (size_t)this->ncols - (size_t)(c1 - c0);
-	/* TODO scroll makes the lines jump by a pixel */
-	for (r = r0; r < r1; r++, y0 = y1, skip = row_skip) {
+	skip = (size_t)cells.r0 + (size_t)cells.r_off;
+	skip = skip * (size_t)this->ncols + (size_t)cells.c0;
+	row_skip = (size_t)this->ncols - (size_t)(cells.c1 - cells.c0);
+	for (r = cells.r0; r < cells.r1; r++, y0 = y1, skip = row_skip) {
 		while (skip) {
-			size_t max_jump = (size_t)(this->ranges[range].last - cp + 1u);
-			size_t jump = MIN(skip, max_jump);
+			max_jump = (size_t)(this->ranges[range].last - cp + 1u);
+			jump = MIN(skip, max_jump);
 			cp += (uint32_t)jump;
 			skip -= jump;
 			if (cp > this->ranges[range].last) {
@@ -175,15 +201,15 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 				cp = this->ranges[range].first;
 			}
 		}
-		x0 = this->viewport_w * c0 / this->ncols;
-		y1 = this->viewport_h * (r + 1) / this->nrows;
-		for (c = c0; c < c1; c++, cp++, x0 = x1) {
+		x0 = (this->viewport_w + 1) * cells.c0 / this->ncols;
+		y1 = (this->viewport_h + 1) * (r + 1) / this->nrows;
+		for (c = cells.c0; c < cells.c1; c++, cp++, x0 = x1) {
 			if (cp > this->ranges[range].last) {
 				if (++range == this->nranges)
 					goto out;
 				cp = this->ranges[range].first;
 			}
-			x1 = this->viewport_w * (c + 1) / this->ncols;
+			x1 = (this->viewport_w + 1) * (c + 1) / this->ncols;
 
 			format_character((gunichar)cp, text);
 			fit_text(this, text, &text_w, &text_h);
@@ -193,39 +219,28 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 	}
 
 out:
+	/* Grey out unused area */
+	set_source_colour_blend(g, &style->base[GTK_STATE_NORMAL], 0.05, &style->text[GTK_STATE_NORMAL]);
+	y0 = (this->viewport_h + 1) * r / this->nrows;
+	x0 = (this->viewport_w + 1) * c / this->ncols;
+	y1 = (this->viewport_h + 1) * (r + 1) / this->nrows;
+	cairo_rectangle(g, x0, y0, (double)this->viewport_w - x0, y1 - y0);
+	cairo_fill(g);
+	cairo_rectangle(g, 0.0, y1, (double)this->viewport_w, (double)this->viewport_h - y1);
+	cairo_fill(g);
+
 	cairo_destroy(g);
 	return FALSE;
 }
 
 
 static void
-update_adjustment(CharTable *this)
-{
-	uint32_t nrows_total;
-	nrows_total = this->nchars + (uint32_t)this->ncols - 1u;
-	nrows_total /= (uint32_t)this->nrows;
-	/* TODO
-	if (!this->adjustment)
-		return;
-	gtk_adjustment_set_upper(this->adjustment, (double)nrows_total);
-	gtk_adjustment_set_page_increment(this->adjustment, this->nrows);
-	gtk_adjustment_set_page_size(this->adjustment, this->nrows);
-	*/
-}
-
-
-static int
 update_cell_size(GtkWidget *widget, int ranges_changed)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
-	int text_w, text_h;
-	int cell_w, cell_h;
+	int text_w, text_h, cell_w, cell_h;
 	uint32_t nchars;
-	int table_h;
 	size_t i;
-
-	int old_ncols = this->ncols;
-	int old_cell_h = this->cell_h;
 
 	pango_layout_set_text(this->layout, REFERENCE_CHARACTER, -1);
 
@@ -237,43 +252,50 @@ update_cell_size(GtkWidget *widget, int ranges_changed)
 
 	cell_w = MAX(text_w, 1) * CELL_WIDTH_FACTOR;
 	cell_h = MAX(text_h, 1) * CELL_HEIGHT_FACTOR;
-	this->ncols = MAX(this->viewport_w / cell_w, 1);
-	this->nrows = MAX(this->viewport_h / cell_h, 1);
-	cell_w = MAX(this->viewport_w / this->ncols - 1, 1);
-	cell_h = MAX(this->viewport_h / this->nrows - 1, 1);
+	this->ncols = (this->viewport_w + 1) / (cell_w + 1);
+	this->nrows = (this->viewport_h + 1) / (cell_h + 1);
+	this->ncols = MAX(this->ncols, 1);
+	this->nrows = MAX(this->nrows, 1);
+
+	cell_w = (this->viewport_w + 1) / this->ncols - 1;
+	cell_h = (this->viewport_h + 1) / this->nrows - 1;
+	cell_w = MAX(cell_w, 1);
+	cell_h = MAX(cell_h, 1);
 	this->max_w = cell_w - CELL_X_CLEARANCE * 2;
 	this->max_h = cell_h - CELL_Y_CLEARANCE * 2;
 	this->max_w = this->max_w < 1 ? cell_w : this->max_w;
 	this->max_h = this->max_h < 1 ? cell_h : this->max_h;
 	this->cell_h = cell_h;
 
-	if (old_ncols == this->ncols && old_cell_h == this->cell_h && !ranges_changed)
-		return 0;
-
-	nchars = (uint32_t)this->nranges;
-	for (i = 0u; i < this->nranges; i++)
-		nchars += this->ranges[i].last - this->ranges[i].first;
-	if (this->nchars != nchars) {
+	if (ranges_changed) {
+		nchars = (uint32_t)this->nranges;
+		for (i = 0u; i < this->nranges; i++)
+			nchars += this->ranges[i].last - this->ranges[i].first;
 		this->nchars = nchars;
-		update_adjustment(this);
 	}
-	table_h = (int)(nchars / (uint32_t)this->ncols);
-	if (nchars % (uint32_t)this->ncols)
-		table_h += 1;
-	table_h = table_h > INT_MAX / this->cell_h ? INT_MAX : table_h * this->cell_h;
-	if (this->table_h == table_h)
-		return 0;
-	this->table_h = table_h;
-	return 1;
+}
+
+
+static void
+update_content_size(CharTable *this)
+{
+	GtkWidget *parent = gtk_widget_get_parent(GTK_WIDGET(this));
+	int nrows;
+	if (parent && LOGICAL_IS_SCROLL_PANE(parent)) {
+		nrows = (int)(this->nchars / (uint32_t)this->ncols);
+		nrows += this->nchars % (uint32_t)this->ncols > 0u;
+		logical_scroll_pane_set_content_size(LOGICAL_SCROLL_PANE(parent), this->ncols, nrows);
+		logical_scroll_pane_set_viewport_size(LOGICAL_SCROLL_PANE(parent), this->ncols, this->nrows);
+	}
 }
 
 
 static void
 gcmap_char_table_size_request(GtkWidget *widget, GtkRequisition *requisition)
 {
-	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	(void) widget;
 	requisition->width = 1;
-	requisition->height = this->table_h;
+	requisition->height = 1;
 }
 
 static gboolean
@@ -294,7 +316,6 @@ gcmap_char_table_init(CharTable *this)
 	this->max_w = 1;
 	this->max_h = 1;
 	this->cell_h = 1;
-	this->table_h = 1;
 	this->nchars = 0u;
 	this->ranges = NULL;
 	this->nranges = 0u;
@@ -311,8 +332,6 @@ gcmap_char_table_init(CharTable *this)
 
 	g_signal_connect(widget, "button-press-event",
 	                 G_CALLBACK(&gcmap_char_table_button_press), NULL);
-
-	/* TODO scrolling with control held should change font size (attempt to keep hover glyph in place) */
 }
 
 
@@ -352,7 +371,8 @@ gcmap_char_table_set_font_family(CharTable *this, const char *family)
 	pango_font_description_set_family(this->font, family);
 	pango_layout_set_font_description(this->layout, this->font);
 	pango_layout_context_changed(this->layout);
-	gtk_widget_queue_resize(GTK_WIDGET(this));
+	update_cell_size(GTK_WIDGET(this), 0);
+	update_content_size(this);
 	gtk_widget_queue_draw(GTK_WIDGET(this));
 }
 
@@ -394,7 +414,8 @@ gcmap_char_table_set_font_size(CharTable *this, int size)
 	pango_layout_set_font_description(this->layout, this->font);
 	pango_layout_context_changed(this->layout);
 	widget = GTK_WIDGET(this);
-	gtk_widget_queue_resize(widget);
+	update_cell_size(widget, 0);
+	update_content_size(this);
 	gtk_widget_queue_draw(widget);
 }
 
@@ -408,8 +429,8 @@ gcmap_char_table_set_ranges(CharTable *this, const struct libcmap_range *ranges,
 	this->ranges = ranges;
 	this->nranges = nranges;
 	widget = GTK_WIDGET(this);
-	if (update_cell_size(widget, 1))
-		gtk_widget_queue_resize(widget);
+	update_cell_size(widget, 1);
+	update_content_size(this);
 	gtk_widget_queue_draw(widget);
 }
 
@@ -420,6 +441,7 @@ gcmap_char_table_viewport_updated(CharTable *this, int viewport_w, int viewport_
 	this->viewport_w = viewport_w;
 	this->viewport_h = viewport_h;
 	update_cell_size(GTK_WIDGET(this), 0);
+	update_content_size(this);
 }
 
 

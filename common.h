@@ -25,9 +25,16 @@
 # define HAVE_ITEM_TOOLTIPS
 #endif
 
+#if defined(__GNUC__)
+# define PURE __attribute__((__pure__))
+#else
+# define PURE
+#endif
+
 #define COMMA ,
 
 #include "char-table.h"
+#include "logical-scroll-pane.h"
 
 /* colour.c */
 double srgb_encode_unsigned(double t);

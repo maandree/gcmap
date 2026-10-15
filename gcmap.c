@@ -728,17 +728,17 @@ vtabtext_changed(GtkWidget *menu_item, void *user_data)
 
 
 static void
-chartable_viewport_size_allocate(GtkWidget *viewport, GtkAllocation *allocation, void *user_data) {
+chartable_size_allocate(GtkWidget *widget, GtkAllocation *allocation, void *user_data)
+{
 	(void) user_data;
-	(void) viewport;
-	gcmap_char_table_viewport_updated(GCMAP_CHAR_TABLE(chartable), allocation->width, allocation->height);
+	gcmap_char_table_viewport_updated(GCMAP_CHAR_TABLE(widget), allocation->width, allocation->height);
 }
 
 
 static void
 create_window(const char *default_font, PangoWeight default_weight, PangoStyle default_style)
 {
-	GtkWidget *vbox, *hbox, *left, *scrolled, *viewport;
+	GtkWidget *vbox, *hbox, *left, *scrolled;
 	GtkWidget *label, *copybutton, *align, *menubar, *menu;
 	GtkListStore *store;
 	GtkCellRenderer *renderer;
@@ -877,21 +877,18 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_TOP);
 
 	/* TODO character map tab pane (should have focus: gtk_widget_grab_focus(GTK_WIDGET(...)) */
-	scrolled = gtk_scrolled_window_new(NULL, NULL);
-	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
-	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
+	scrolled = logical_scroll_pane_new();
+	logical_scroll_pane_set_hscrollbar_visible(LOGICAL_SCROLL_PANE(scrolled), FALSE);
 	chartable = gcmap_char_table_new(default_font, (int)default_font_size, default_weight, default_style);
-	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(scrolled), chartable);
-	viewport = gtk_bin_get_child(GTK_BIN(scrolled));
-	g_signal_connect(viewport, "size-allocate", G_CALLBACK(&chartable_viewport_size_allocate), NULL);
-	/* TODO scroll shall snap to beginning of a row */
+	logical_scroll_pane_set_child(LOGICAL_SCROLL_PANE(scrolled), chartable);
+	g_signal_connect(chartable, "size-allocate", G_CALLBACK(&chartable_size_allocate), NULL);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _table"));
 
 #ifdef TODO
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO")); // gtk_scrolled_window_add_with_viewport
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _details"));
 #endif
 
@@ -899,7 +896,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO")); // gtk_scrolled_window_add_with_viewport
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Glyph v_ariants"));
 #endif
 
@@ -907,7 +904,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO")); // gtk_scrolled_window_add_with_viewport
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Font c_omparison"));
 #endif
 
@@ -1009,9 +1006,6 @@ main(int argc, char *argv[])
 {
 	GtkIconTheme *theme;
 	const char *icon;
-	int xargc = 1;
-	char *xargva[] = {argv[0], NULL};
-	char **xargv = xargva;
 	enum listing listing = (enum listing)0;
 	int use_bold = 0;
 	int use_italic = 0;
@@ -1022,10 +1016,10 @@ main(int argc, char *argv[])
 
 	ARGBEGIN {
 	case 'B':
-		listing = 1;
+		listing = BY_BLOCK;
 		break;
 	case 'S':
-		listing = 0;
+		listing = BY_SCRIPT;
 		break;
 	case 'b':
 		use_bold = 1;
@@ -1077,7 +1071,7 @@ main(int argc, char *argv[])
 	g_set_prgname(argv0);
 	g_set_application_name("gcmap");
 
-	gtk_init(&xargc, &xargv);
+	gtk_init(NULL, NULL);
 	theme = gtk_icon_theme_get_default();
 	if (!gtk_icon_theme_has_icon(theme, icon = "apps/gcmap") &&
 	    !gtk_icon_theme_has_icon(theme, icon = "gcmap") &&
