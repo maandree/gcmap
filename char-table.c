@@ -36,11 +36,7 @@ is_printable_character(gunichar ch)
 static void
 format_character(gunichar ch, char *buf)
 {
-	if (!is_printable_character(ch)) {
-		buf[0u] = '\0';
-		return;
-	}
-	buf[g_unichar_to_utf8(ch, buf)] = '\0';
+	buf[is_printable_character(ch) ? g_unichar_to_utf8(ch, buf) : 0] = '\0';
 }
 
 

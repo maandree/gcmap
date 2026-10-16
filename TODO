@@ -1,6 +1,6 @@
-Add drag-and-drop support, both in to find a character and out to copy a character
-
 Scroll with wheel, page up/down, or scroll bar shall adjust the character selection to remain in view
+
+Keep selected character in view when resizing the chart or the cells
 
 Show font and upscaled (based on same font size) glyph when Shift is held
 (note: selection change via gcmap_char_table_key_press may require update)
@@ -9,11 +9,13 @@ Show font and upscaled (based on same font size) glyph when mouse button 3 (righ
 is held down; this shall also select the character and do so continuously while
 moving the pointer
 
+The scaled up glyph popup should display metrics
+
+When switching group, keep the codepoint selected if it also exists in then new group
+
 Middle-clicking should find the character stored in PRIMARY (SECONDARY if Mod1 is held down)
 
-Keep selected character in view when resizing the chart or the cells
-
-Optionally show metrics
+Add drag-and-drop support, both in to find a character and out to copy a character
 
 Add bookmarks expander under the tabbed pane
 
