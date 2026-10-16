@@ -15,15 +15,19 @@ typedef struct _CharTable {
 	int nrows, ncols;
 	int max_w, max_h;
 	int cell_h;
-	uint32_t nchars;
+	uint32_t nchars, selected;
 	int viewport_w, viewport_h;
 	PangoFontDescription *font;
 	PangoLayout *layout;
 	int font_size;
+	int snap_cols_to_2pow;
+	int snap_rows_to_2pow;
+	unsigned multiclick_count;
 	PangoWeight font_weight;
 	PangoStyle font_style;
 	const struct libcmap_range *ranges;
 	size_t nranges;
+	void (*selection_callback)(uint32_t index, uint32_t codepoint, int meta, int copy_to_text_field);
 } CharTable;
 
 typedef struct _CharTableClass {
@@ -38,5 +42,10 @@ void gcmap_char_table_set_font_family(CharTable *this, const char *family);
 void gcmap_char_table_set_font_weight(CharTable *this, PangoWeight weight);
 void gcmap_char_table_set_font_style(CharTable *this, PangoStyle style);
 void gcmap_char_table_set_font_size(CharTable *this, int size);
+void gcmap_char_table_set_snap_cols_to_2pow(CharTable *this, int active);
+void gcmap_char_table_set_snap_rows_to_2pow(CharTable *this, int active);
 void gcmap_char_table_set_ranges(CharTable *this, const struct libcmap_range *ranges, size_t nranges);
 void gcmap_char_table_viewport_updated(CharTable *this, int viewport_w, int viewport_h);
+void gcmap_char_table_select_cell(CharTable *this, int32_t selected, int clamp, int meta);
+void gcmap_char_table_adjust_cell_selection(CharTable *this, int32_t adjustment, int clamp, int meta);
+int gcmap_char_table_select_codepoint(CharTable *this, uint32_t codepoint);

@@ -5,25 +5,9 @@ G_DEFINE_TYPE(LogicalScrollPane, logical_scroll_pane, GTK_TYPE_BIN)
 static void
 logical_scroll_pane_adjustment_value_changed(GtkAdjustment *adjustment, LogicalScrollPane *this)
 {
-#if defined(__GNUC__)
-# pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wfloat-equal"
-#endif
-
-	double value;
-	if (this->viewport_size_is_logical) {
-		value = round(adjustment->value);
-		if (value != adjustment->value) {
-			gtk_adjustment_set_value(adjustment, value);
-			return;
-		}
-	}
+	(void) adjustment;
 	if (this->child)
 		gtk_widget_queue_draw(this->child);
-
-#if defined(__GNUC__)
-# pragma GCC diagnostic pop
-#endif
 }
 
 static void
@@ -33,7 +17,7 @@ logical_scroll_pane_configure_adjustment(LogicalScrollPane *this, GtkAdjustment 
 	page_size = MAX(page_size, 1);
 	pg = (double)page_size;
 	upper = (double)MAX(content_size - page_size, 0);
-	value = this->viewport_size_is_logical ? round(adjustment->value) : adjustment->value;
+	value = adjustment->value;
 	value = MAX(value, 0.0);
 	value = MIN(value, upper);
 	upper = (double)MAX(content_size, page_size);
@@ -203,7 +187,7 @@ logical_scroll_pane_child_scroll(GtkWidget *widget, GdkEventScroll *event, Logic
 
 	(void) widget;
 
-	switch (event->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_META_MASK)) {
+	switch (event->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_MOD1_MASK)) {
 	case 0:
 		switch (event->direction) {
 		case GDK_SCROLL_LEFT:
@@ -244,7 +228,7 @@ logical_scroll_pane_child_key_press(GtkWidget *widget, GdkEventKey *event, Logic
 
 	(void) widget;
 
-	switch (event->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_META_MASK)) {
+	switch (event->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_MOD1_MASK)) {
 	case 0:
 		break;
 	case GDK_SHIFT_MASK:

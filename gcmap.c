@@ -44,10 +44,15 @@ static GtkWidget *nextgroup;
 static GtkWidget *prevgroup;
 static GtkWidget *bylisting[NLISTINGS];
 static GtkWidget *vtabtext;
+static GtkWidget *snap2_cols;
+static GtkWidget *snap2_rows;
 static GtkWidget *chartable;
 static GtkListStore *fontcombo_store;
 static GtkAdjustment *fontsize_adjustment;
 static GtkAccelGroup *accelgroup;
+
+static uint32_t selected_codepoint = 0u;
+static int switching_groups = 0;
 
 #ifdef HAVE_ITEM_TOOLTIPS
 /* relying on initialisation to NULL and 0 */
@@ -56,6 +61,76 @@ static size_t ngroup_tooltips[NLISTINGS];
 static const char **groups_tooltips;
 static size_t ngroups_tooltips;
 #endif
+
+
+static size_t
+format_statusbar_message(char *buffer, size_t size)
+{
+	const struct libcmap_codepoint_data *data;
+	int r;
+	size_t len = 0u;
+
+	r = snprintf(buffer, size, "U+%04"PRIX32, selected_codepoint);
+	if (r < 0)
+		eprintf("snprintf");
+	len += (size_t)r;
+	buffer = &buffer[MIN(size, (size_t)r)];
+	size -= MIN(size, (size_t)r);
+
+	data = libcmap_find_codepoint_data(selected_codepoint);
+	if (!data)
+		return len;
+
+	r = snprintf(buffer, size, " %s", data->name);
+	if (r < 0)
+		eprintf("snprintf");
+	len += (size_t)r;
+	buffer = &buffer[MIN(size, (size_t)r)];
+	size -= MIN(size, (size_t)r);
+
+	return len;
+}
+
+
+static void
+update_statusbar(void)
+{
+	size_t len = format_statusbar_message(NULL, 0u);
+	char *message = emalloc(++len);
+	format_statusbar_message(message, len);
+	gtk_statusbar_pop(GTK_STATUSBAR(statusbar), 0u);
+        gtk_statusbar_push(GTK_STATUSBAR(statusbar), 0u, message);
+	free(message);
+}
+
+
+static void
+character_cell_selected(uint32_t index, uint32_t codepoint, int meta, int copy_to_text_field)
+{
+	GtkEditable *editable;
+	char text[16];
+	int len, pos;
+
+	(void) index;
+
+	text[len = g_unichar_to_utf8(codepoint, text)] = '\0';
+	selected_codepoint = codepoint;
+
+	if (copy_to_text_field) {
+		editable = GTK_EDITABLE(copytext);
+		pos = gtk_editable_get_position(editable);
+		gtk_editable_insert_text(editable, text, len, &pos);
+		gtk_editable_set_position(editable, pos);
+	} else if (meta) {
+		gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_SECONDARY), text, len);
+		/* XXX add setting to swap SECONDARY and PRIMARY */
+	} else {
+		gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_PRIMARY), text, len);
+		/* XXX add setting to disable */
+	}
+
+	update_statusbar();
+}
 
 
 static int
@@ -97,6 +172,18 @@ populate_font_families(GtkWidget *widget, GtkListStore *store, const char **sele
 	g_free(families);
 
 	return (int)selected_index;
+}
+
+
+static void
+select_group(int index)
+{
+	GtkTreeView *treeview = GTK_TREE_VIEW(grouplist);
+	GtkTreePath *path = gtk_tree_path_new_from_indices(index, -1);
+	GtkTreeSelection *selection = gtk_tree_view_get_selection(treeview);
+	gtk_tree_selection_select_path(selection, path);
+	gtk_tree_view_set_cursor(treeview, path, NULL, FALSE);
+	gtk_tree_path_free(path);
 }
 
 
@@ -225,6 +312,9 @@ grouplist_selection_changed(GtkTreeSelection *selection, void *user_data)
 	int index;
 
 	(void) user_data;
+
+	if (switching_groups)
+		return;
 
 	if (!gtk_tree_selection_get_selected(selection, &model, &iter))
 		return;
@@ -388,14 +478,32 @@ static void
 listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 {
 	static int recursion_guard = 0;
+
 	GtkWidget *label;
 	int listing;
+	int all_selected = 1;
+	GtkTreeSelection *selection;
+	GtkTreeModel *model;
+	GtkTreePath *path;
+	GtkTreeIter iter;
+	const struct libcmap_block *block;
+	const struct libcmap_script *script;
+	uint32_t codepoint = selected_codepoint;
 
 	if (recursion_guard)
 		return;
 	recursion_guard++;
 
 	listing = gtk_combo_box_get_active(combo);
+
+	switching_groups++;
+
+	selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(grouplist));
+	if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+		path = gtk_tree_model_get_path(model, &iter);
+		all_selected = !gtk_tree_path_get_indices(path)[0u];
+		gtk_tree_path_free(path);
+	}
 
 	switch (listing) {
 #define X(ENUM, TITLE, TYPE, SELFUN, POPFUN, ACCEL)\
@@ -416,7 +524,24 @@ listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 	if (!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(bylisting[listing])))
 		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(bylisting[listing]), TRUE);
 
-	/* TODO select appropriate list item to keep select character */
+	switching_groups--;
+
+	if (all_selected) {
+		select_group(0);
+	} else {
+		switch ((enum listing)listing) {
+		case BY_BLOCK:
+			block = libcmap_find_block(codepoint, NULL);
+			select_group((block ? (int)(block - libcmap_block_list) : (int)libcmap_block_list_size) + 1);
+			break;
+		case BY_SCRIPT:
+			script = libcmap_find_script(codepoint, NULL, NULL);
+			select_group((script ? (int)(script - libcmap_script_list) : (int)libcmap_script_list_size) + 1);
+			break;
+		default:
+			abort();
+		}
+	}
 
 	recursion_guard--;
 }
@@ -544,6 +669,24 @@ zoom_original(GtkWidget *menu_item, void *user_data)
 }
 
 
+static void
+snap2_cols_changed(GtkWidget *menu_item, void *user_data)
+{
+	(void) user_data;
+	gcmap_char_table_set_snap_cols_to_2pow(GCMAP_CHAR_TABLE(chartable),
+	                                       gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menu_item)));
+}
+
+
+static void
+snap2_rows_changed(GtkWidget *menu_item, void *user_data)
+{
+	(void) user_data;
+	gcmap_char_table_set_snap_rows_to_2pow(GCMAP_CHAR_TABLE(chartable),
+	                                       gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menu_item)));
+}
+
+
 static int
 zoom_original_accel(GtkAccelGroup *accel_group, GObject *acceleratable, unsigned int keyval,
                     GdkModifierType modifier, void *user_data)
@@ -557,18 +700,20 @@ zoom_original_accel(GtkAccelGroup *accel_group, GObject *acceleratable, unsigned
 }
 
 static void
-go_next(GtkWidget *menu_item, void *user_data) /* TODO */
+go_next(GtkWidget *menu_item, void *user_data)
 {
 	(void) menu_item;
 	(void) user_data;
+	gcmap_char_table_adjust_cell_selection(GCMAP_CHAR_TABLE(chartable), +1, 0, 0);
 }
 
 
 static void
-go_prev(GtkWidget *menu_item, void *user_data) /* TODO */
+go_prev(GtkWidget *menu_item, void *user_data)
 {
 	(void) menu_item;
 	(void) user_data;
+	gcmap_char_table_adjust_cell_selection(GCMAP_CHAR_TABLE(chartable), -1, 0, 0);
 }
 
 
@@ -778,8 +923,8 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 	vtabtext = add_check_menu_item(menu, "_Vertical tab text", 1, 0, 0, &vtabtext_changed);
 	gtk_widget_set_sensitive(vtabtext, FALSE);
-	/* TODO add options to put some tabs in side-pane on the right */
-	/* TODO add option for shorter tab texts */
+	/* XXX add options to put some tabs in a side-pane on the right */
+	/* XXX add option for shorter tab texts */
 
 	menu = add_menu(menubar, "_View");
 	group = NULL;
@@ -787,7 +932,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	bylisting[ENUM] = add_radio_menu_item(menu, TITLE, &group, ACCEL, GDK_CONTROL_MASK, &SELFUN)
 	LIST_LISTINGS(X, ;);
 #undef X
-	/* TODO add option to use character list (show glyphs with names in rows) instead of character grid */
+	/* XXX add option to use character list (show glyphs with names in rows) instead of character grid */
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 	add_menu_item(menu, "_Larger glyphs", "zoom-in", GDK_plus, GDK_CONTROL_MASK, &zoom_in);
 	add_menu_item(menu, "S_maller glyphs", "zoom-out", GDK_minus, GDK_CONTROL_MASK, &zoom_out);
@@ -796,6 +941,9 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	                        g_cclosure_new(G_CALLBACK(&zoom_original_accel), NULL, NULL));
 	gtk_accel_group_connect(accelgroup, GDK_1, GDK_CONTROL_MASK, 0,
 	                        g_cclosure_new(G_CALLBACK(&zoom_original_accel), NULL, NULL));
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+	snap2_cols = add_check_menu_item(menu, "Snap _columns to power of 2", 0, GDK_KEY_2, GDK_CONTROL_MASK, &snap2_cols_changed);
+	snap2_rows = add_check_menu_item(menu, "Snap _rows to power of 2", 0, GDK_KEY_3, GDK_CONTROL_MASK, &snap2_rows_changed);
 
 	menu = add_menu(menubar, "_Go");
 	add_menu_item(menu, "_Next character", "go-next", GDK_n, GDK_CONTROL_MASK, &go_next);
@@ -844,7 +992,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	                         small_font_size_increment, big_font_size_increment, 0);
 	fontsize_adjustment = GTK_ADJUSTMENT(obj);
 	sizespinner = gtk_spin_button_new(fontsize_adjustment, 0, 0);
-	g_signal_connect(fontsize_adjustment, "value-changed", G_CALLBACK(fontsize_changed), NULL);
+	g_signal_connect(fontsize_adjustment, "value-changed", G_CALLBACK(&fontsize_changed), NULL);
 	gtk_box_pack_start(GTK_BOX(hbox), sizespinner, FALSE, FALSE, 0);
 	accessible = gtk_widget_get_accessible(sizespinner);
 	atk_object_set_name(accessible, "Font size");
@@ -880,7 +1028,6 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	gtk_notebook_set_scrollable(GTK_NOTEBOOK(notebook), TRUE);
 	gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_TOP);
 
-	/* TODO character map tab pane (should have focus: gtk_widget_grab_focus(GTK_WIDGET(...)) */
 	scrolled = logical_scroll_pane_new();
 	logical_scroll_pane_set_hscrollbar_visible(LOGICAL_SCROLL_PANE(scrolled), FALSE);
 	chartable = gcmap_char_table_new(default_font, (int)default_font_size, default_weight, default_style);
@@ -892,7 +1039,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("todo"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _details"));
 #endif
 
@@ -900,7 +1047,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("todo"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Glyph v_ariants"));
 #endif
 
@@ -908,7 +1055,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("TODO"));
+	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("todo"));
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Font c_omparison"));
 #endif
 
@@ -1017,6 +1164,9 @@ main(int argc, char *argv[])
 	int min_font_size_set = 0;
 	int max_font_size_set = 0;
 	const char *font_family = DEFAULT_FONT_FAMILY;
+	const struct libcmap_block *block;
+	const struct libcmap_script *script;
+	char *message;
 
 	ARGBEGIN {
 	case 'B':
@@ -1100,8 +1250,30 @@ main(int argc, char *argv[])
 	groups_tooltips = group_tooltips[listing];
 	ngroups_tooltips = ngroup_tooltips[listing];
 
-	/* TODO select character (U+0000) and group (locate the one containing it, go to All if not found) */
+	switch (listing) {
+	case BY_BLOCK:
+		block = libcmap_find_block(selected_codepoint, NULL);
+		select_group(block ? (int)(block - libcmap_block_list) + 1 : 0);
+		break;
+	case BY_SCRIPT:
+		script = libcmap_find_script(selected_codepoint, NULL, NULL);
+		select_group(script ? (int)(script - libcmap_script_list) + 1 : 0);
+		break;
+	default:
+		abort();
+	}
+	GCMAP_CHAR_TABLE(chartable)->selection_callback = &character_cell_selected;
+	gcmap_char_table_select_codepoint(GCMAP_CHAR_TABLE(chartable), selected_codepoint);
+
+	if (libsimple_asprintf(&message, "Using Unicode %s", libcmap_unicode_version) >= 0 && message) {
+		gtk_statusbar_pop(GTK_STATUSBAR(statusbar), 0u);
+		gtk_statusbar_push(GTK_STATUSBAR(statusbar), 0u, message);
+		free(message);
+	} else {
+		update_statusbar();
+	}
 
 	gtk_window_present(GTK_WINDOW(window));
+	gtk_widget_grab_focus(GTK_WIDGET(chartable));
 	gtk_main();
 }
