@@ -1,17 +1,42 @@
 /* See LICENSE file for copyright and license details. */
 #include "common.h"
 
-#define REFERENCE_CHARACTER "X"
-#define CELL_WIDTH_FACTOR   4
-#define CELL_HEIGHT_FACTOR  2
-#define CELL_X_CLEARANCE    2
-#define CELL_Y_CLEARANCE    2
+#define REFERENCE_CHARACTER  "X"
+#define CELL_WIDTH_FACTOR    4
+#define CELL_HEIGHT_FACTOR   2
+#define CELL_X_CLEARANCE     2
+#define CELL_Y_CLEARANCE     2
+#define MAGNIFICATION_WIDTH  200
+#define MAGNIFICATION_HEIGHT 200
+
+#define IS_SHIFT_KEY(KEYVAL) ((KEYVAL) == GDK_KEY_Shift_L || (KEYVAL) == GDK_KEY_Shift_R)
+#define SHIFT_KEY(KEYVAL) (1u << ((KEYVAL) == GDK_KEY_Shift_R))
+
 
 struct cells {
 	int r0, c0; /* inclusive */
 	int r1, c1; /* exclusive */
 	int r_off;
 };
+
+
+struct glyph_layout {
+	double scale;
+	double x;
+	double y;
+	double width;
+	double height;
+
+	/* XXX this should be calculated and displayed with lines */
+	double baseline_y;
+	double descender_y;
+	double ascender_y;
+	double x_height_y;
+	double cap_height_y;
+	double preadvance_x;
+	double postadvance_x;
+};
+
 
 G_DEFINE_TYPE(CharTable, gcmap_char_table, GTK_TYPE_DRAWING_AREA)
 
@@ -33,17 +58,20 @@ is_printable_character(gunichar ch)
 }
 
 
-static void
+static int
 format_character(gunichar ch, char *buf)
 {
-	buf[is_printable_character(ch) ? g_unichar_to_utf8(ch, buf) : 0] = '\0';
+	int len = is_printable_character(ch) ? g_unichar_to_utf8(ch, buf) : 0;
+	buf[len] = '\0';
+	return len;
 }
 
 
 static void
-apply_font_size(CharTable *this, int size, int *text_w_out, int *text_h_out)
+apply_font_size(CharTable *this, double size, int *text_w_out, int *text_h_out)
 {
-	pango_font_description_set_size(this->font, size * PANGO_SCALE);
+	int size_int = (int)(size * PANGO_SCALE);
+	pango_font_description_set_size(this->font, MAX(size_int, 1));
 	pango_layout_set_font_description(this->layout, this->font);
 	pango_layout_context_changed(this->layout);
 	pango_layout_get_pixel_size(this->layout, text_w_out, text_h_out);
@@ -55,22 +83,38 @@ get_codepoint(CharTable *this, uint32_t index)
 {
 	size_t i = 0u;
 	uint32_t count;
-
 	while (index >= (count = (uint32_t)LIBCMAP_RANGE_SIZE(&this->ranges[i]))) {
 		index -= count;
 		if (++i == this->nranges)
 			abort();
 	}
-
 	return this->ranges[i].first + index;
+}
+
+
+static int
+find_codepoint_index(CharTable *this, uint32_t codepoint, uint32_t *index_out)
+{
+	size_t i = 0u;
+	uint32_t index = 0u;
+	while (i < this->nranges && codepoint > this->ranges[i].last) {
+		index += (uint32_t)LIBCMAP_RANGE_SIZE(&this->ranges[i]);
+		i += 1u;
+	}
+	if (i >= this->nranges || codepoint < this->ranges[i].first)
+		return 0;
+	*index_out = index + codepoint - this->ranges[i].first;
+	return 1;
 }
 
 
 static void
 fit_text(CharTable *this, const char *text, int *text_w_out, int *text_h_out)
 {
-	int size, ok_size = 1;
-	double scale_x, scale_y, scale;
+	double size, ok_size = 1.0;
+	double xscale, yscale, scale;
+	double next_size, steps[] = {1.0, 0.1, 0.01};
+	size_t i;
 
 	/* Set text to measure */
 	pango_layout_set_text(this->layout, text, -1);
@@ -81,15 +125,14 @@ fit_text(CharTable *this, const char *text, int *text_w_out, int *text_h_out)
 		return;
 
 	/* Too large? Then estimate largest smaller size that would fit */
-	scale_x = (double)this->max_w / (double)*text_w_out;
-	scale_y = (double)this->max_h / (double)*text_h_out;
-	scale = MIN(scale_x, scale_y);
+	xscale = (double)this->max_w / (double)*text_w_out;
+	yscale = (double)this->max_h / (double)*text_h_out;
+	scale = MIN(xscale, yscale);
 	scale = MIN(scale, 1) * this->font_size;
-	size = (int)scale;
-	size = MAX(size, 1);
+	size = MAX(scale, 1.0);
 
 	/* Check and decrease by one until it fits */
-	for (; size > 1; size--) {
+	for (; size > 1.0; size -= 1.0) {
 		apply_font_size(this, size, text_w_out, text_h_out);
 		if (*text_w_out <= this->max_w && *text_h_out <= this->max_h) {
 			ok_size = size;
@@ -98,20 +141,19 @@ fit_text(CharTable *this, const char *text, int *text_w_out, int *text_h_out)
 	}
 
 	/* Maybe it was too small, then try larger */
-	if (*text_w_out < this->max_w && *text_h_out < this->max_h) {
-		goto start;
-		do {
-			ok_size++;
-		start:
-			if (ok_size == this->font_size)
+	for (i = 0u; i < ELEMSOF(steps); i++) {
+		while (*text_w_out < this->max_w && *text_h_out < this->max_h) {
+			next_size = MIN(ok_size + steps[i], (double)this->font_size);
+			if (next_size <= ok_size)
 				break;
-			apply_font_size(this, ok_size + 1, text_w_out, text_h_out);
-		} while (*text_w_out < this->max_w && *text_h_out < this->max_h);
+			apply_font_size(this, next_size, text_w_out, text_h_out);
+			if (*text_w_out < this->max_w && *text_h_out < this->max_h)
+				ok_size = next_size;
+		}
 	}
 
-	/* Use the on that fit, 1 if none fit */
-	if (ok_size != size)
-		apply_font_size(this, ok_size, text_w_out, text_h_out);
+	/* Use the one that fits, 1 if none fit */
+	apply_font_size(this, ok_size, text_w_out, text_h_out);
 }
 
 
@@ -120,8 +162,6 @@ get_exposed_cells(GtkWidget *widget, GdkEventExpose *event, struct cells *cells_
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
 	GdkRectangle area = event->area;
-	LogicalScrollPane *scrolls = LOGICAL_SCROLL_PANE(gtk_widget_get_parent(widget));
-	GtkAdjustment *vadjustment = logical_scroll_pane_get_vadjustment(scrolls);
 	double y;
 
 	cells_out->r0 = area.y * this->nrows / (this->viewport_h + 1);
@@ -134,7 +174,7 @@ get_exposed_cells(GtkWidget *widget, GdkEventExpose *event, struct cells *cells_
 	cells_out->r1 = MIN(cells_out->r1, cells_out->r0 + this->nrows);
 	cells_out->c1 = MIN(cells_out->c1, cells_out->c0 + this->ncols);
 
-	y = round(vadjustment->value);
+	y = this->vadjustment ? round(this->vadjustment->value) : 0.0;
 	cells_out->r_off = MAX((int)y, 0);
 }
 
@@ -261,6 +301,195 @@ out:
 
 
 static void
+get_selected_cell_screen_rectangle(CharTable *this, int *x_out, int *y_out, int *w_out, int *h_out, int *c_out, int *r_out)
+{
+	double yadj = this->vadjustment ? round(this->vadjustment->value) : 0.0;
+	int yadj_int = (int)yadj;
+	int row = (int)(this->selected / (uint32_t)this->ncols);
+	int col = (int)(this->selected % (uint32_t)this->ncols);
+	row -= MAX(yadj_int, 0);
+	*x_out = (this->viewport_w + 1) * (col + 0) / this->ncols;
+	*y_out = (this->viewport_h + 1) * (row + 0) / this->nrows;
+	*w_out = (this->viewport_w + 1) * (col + 1) / this->ncols - *x_out - 1;
+	*h_out = (this->viewport_h + 1) * (row + 1) / this->nrows - *y_out - 1;
+	*r_out = row;
+	*c_out = col;
+}
+
+
+static int
+fit_magnification(CharTable *this, const char *text, int text_len, struct glyph_layout *layout_out)
+{
+	const int max_w = MAGNIFICATION_WIDTH  - CELL_X_CLEARANCE * 2;
+	const int max_h = MAGNIFICATION_HEIGHT - CELL_Y_CLEARANCE * 2;
+	int font_size = this->font_size * PANGO_SCALE;
+	PangoFontDescription *font;
+	double xscale, yscale;
+	PangoRectangle ink, logical;
+	int x1i, x2i, y1i, y2i;
+	int x1l, x2l, y1l, y2l;
+	int x1, x2, y1, y2;
+
+	font = pango_font_description_copy(this->font);
+	if (!font) {
+		weprintf("pango_font_description_copy:");
+		return -1;
+	}
+
+	pango_font_description_set_size(font, MAX(font_size, 1));
+	pango_layout_set_text(this->magnification_layout, text, text_len);
+	pango_layout_set_font_description(this->magnification_layout, font);
+	pango_layout_context_changed(this->magnification_layout);
+	pango_font_description_free(font);
+	pango_layout_get_pixel_extents(this->magnification_layout, &ink, &logical);
+
+	x1i = MAX(ink.x, 0);
+	y1i = MAX(ink.y, 0);
+	x1l = MAX(logical.x, 0);
+	y1l = MAX(logical.y, 0);
+	x2i = x1i + ink.width;
+	y2i = y1i + ink.height;
+	x2l = x1l + logical.width;
+	y2l = y1l + logical.height;
+	x1 = MIN(x1i, x1l);
+	y1 = MIN(y1i, y1l);
+	x2 = MAX(x2i, x2l);
+	y2 = MAX(y2i, y2l);
+
+	layout_out->x = (double)MAX(x1 - ink.x, 0);
+	layout_out->y = (double)MAX(y1 - ink.y, 0);
+	layout_out->width  = (double)(x2 - x1);
+	layout_out->height = (double)(y2 - y1);
+
+	if (layout_out->width > 0.0 && layout_out->height > 0.0) {
+		xscale = (double)max_w / (double)layout_out->width;
+		yscale = (double)max_h / (double)layout_out->height;
+		layout_out->scale = MIN(xscale, yscale);
+	} else {
+		layout_out->scale = 1.0;
+	}
+
+	layout_out->x *= layout_out->scale;
+	layout_out->y *= layout_out->scale;
+	layout_out->width  *= layout_out->scale;
+	layout_out->height *= layout_out->scale;
+	return 0;
+}
+
+
+static gboolean
+gcmap_char_table_magnification_expose(GtkWidget *widget, GdkEventExpose *event, void *user_data)
+{
+	CharTable *this = user_data;
+	GtkStyle *style = gtk_widget_get_style(GTK_WIDGET(this));
+	cairo_t *g;
+	char text[16];
+	int text_len;
+	struct glyph_layout layout;
+	const double w = (double)MAGNIFICATION_WIDTH;
+	const double h = (double)MAGNIFICATION_HEIGHT;
+
+	g = gdk_cairo_create(widget->window);
+	if (!g) {
+		weprintf("gdk_cairo_create:");
+		return FALSE;
+	}
+
+	text_len = format_character((gunichar)get_codepoint(this, this->selected), text);
+	if (fit_magnification(this, text, text_len, &layout) < 0)
+		return FALSE;
+
+	gdk_cairo_rectangle(g, &event->area);
+	cairo_clip(g);
+	set_source_colour(g, &style->base[GTK_STATE_NORMAL]);
+	cairo_paint(g);
+
+	if (!this->nchars)
+		goto out;
+
+	set_source_colour_blend(g, &style->base[GTK_STATE_NORMAL], 0.05, &style->text[GTK_STATE_NORMAL]);
+	cairo_set_line_width(g, 1.0);
+	cairo_move_to(g, 0.0, 0.5);
+	cairo_line_to(g, w,   0.5);
+	cairo_stroke(g);
+	cairo_move_to(g, 0.0, h - 0.5);
+	cairo_line_to(g, w,   h - 0.5);
+	cairo_stroke(g);
+	cairo_move_to(g, 0.5, 0.0);
+	cairo_line_to(g, 0.5, h);
+	cairo_stroke(g);
+	cairo_move_to(g, w - 0.5, 0.0);
+	cairo_line_to(g, w - 0.5, h);
+	cairo_stroke(g);
+
+	set_source_colour(g, &style->text[GTK_STATE_NORMAL]);
+	cairo_save(g);
+	cairo_translate(g, 0.5 * ((double)MAGNIFICATION_WIDTH  - layout.width)  + layout.x,
+	                   0.5 * ((double)MAGNIFICATION_HEIGHT - layout.height) + layout.y);
+	cairo_scale(g, layout.scale, layout.scale);
+	pango_cairo_show_layout(g, this->magnification_layout);
+	cairo_restore(g);
+
+out:
+	cairo_destroy(g);
+	return FALSE;
+}
+
+
+static void
+gcmap_char_table_update_magnification(CharTable *this)
+{
+	GtkWidget *widget = GTK_WIDGET(this);
+	GdkRectangle monitor;
+	GdkScreen *screen;
+	int monitor_num, x, y, cw, ch;
+	int cx1, cx2, cy1, cy2, col, row;
+	int mx1, mx2, my1, my2;
+
+	if (!this->magnification_window ||
+	    !(this->shift_keys || this->right_button_down) ||
+	    !this->nchars || !GTK_WIDGET_REALIZED(widget)) {
+		if (this->magnification_window)
+			gtk_widget_hide(this->magnification_window);
+		return;
+	}
+
+	get_selected_cell_screen_rectangle(this, &cx1, &cy1, &cw, &ch, &col, &row);
+	gdk_window_get_origin(widget->window, &x, &y);
+	cx1 += x;
+	cy1 += y;
+	cx2 = cx1 + cw;
+	cy2 = cy1 + ch;
+
+	x = cx1 + cw / 2;
+	y = cy1 + ch / 2;
+	screen = gtk_widget_get_screen(widget);
+	gtk_window_set_screen(GTK_WINDOW(this->magnification_window), screen);
+	monitor_num = gdk_screen_get_monitor_at_point(screen, x, y);
+	gdk_screen_get_monitor_geometry(screen, monitor_num, &monitor);
+	mx1 = monitor.x;
+	my1 = monitor.y;
+	mx2 = mx1 + monitor.width;
+	my2 = my1 + monitor.height;
+
+	mx2 -= MAGNIFICATION_WIDTH;
+	my2 -= MAGNIFICATION_HEIGHT;
+
+	cx1 -= 1;
+	x = cx1 > mx2 ? cx2 - MAGNIFICATION_WIDTH  : cx1;
+	y = cy2 > my2 ? cy1 - MAGNIFICATION_HEIGHT : cy2;
+	x = MIN(x, mx2);
+	y = MIN(y, my2);
+	x = MAX(x, mx1);
+	y = MAX(y, my1);
+
+	gtk_window_move(GTK_WINDOW(this->magnification_window), x, y);
+	gtk_widget_show_all(this->magnification_window);
+	gtk_widget_queue_draw(this->magnification);
+}
+
+
+static void
 update_cell_size(GtkWidget *widget, int ranges_changed)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
@@ -310,6 +539,28 @@ update_cell_size(GtkWidget *widget, int ranges_changed)
 
 
 static void
+gcmap_char_table_scroll_selected_cell_into_view(CharTable *this)
+{
+	int selected_row, viewport_row, yadj_int;
+	double yadj;
+
+	if (!this->vadjustment || !this->nchars)
+		return;
+
+	yadj = round(this->vadjustment->value);
+	yadj_int = (int)yadj;
+
+	selected_row = (int)(this->selected / (uint32_t)this->ncols);
+	viewport_row = MAX(yadj_int, 0);
+
+	if (selected_row < viewport_row)
+		gtk_adjustment_set_value(this->vadjustment, (double)selected_row);
+	else if (selected_row >= viewport_row + this->nrows)
+		gtk_adjustment_set_value(this->vadjustment, (double)(selected_row - this->nrows + 1));
+}
+
+
+static void
 update_content_size(CharTable *this)
 {
 	GtkWidget *parent = gtk_widget_get_parent(GTK_WIDGET(this));
@@ -317,8 +568,17 @@ update_content_size(CharTable *this)
 	if (parent && LOGICAL_IS_SCROLL_PANE(parent)) {
 		nrows = (int)(this->nchars / (uint32_t)this->ncols);
 		nrows += this->nchars % (uint32_t)this->ncols > 0u;
+
+		if (this->vadjustment_value_changed_id)
+			g_signal_handler_block(this->vadjustment, this->vadjustment_value_changed_id);
+
 		logical_scroll_pane_set_content_size(LOGICAL_SCROLL_PANE(parent), this->ncols, nrows);
 		logical_scroll_pane_set_viewport_size(LOGICAL_SCROLL_PANE(parent), this->ncols, this->nrows);
+
+		if (this->vadjustment_value_changed_id)
+			g_signal_handler_unblock(this->vadjustment, this->vadjustment_value_changed_id);
+		gcmap_char_table_scroll_selected_cell_into_view(this);
+		gcmap_char_table_update_magnification(this);
 	}
 }
 
@@ -336,9 +596,7 @@ static void
 select_clicked_character(GtkWidget *widget, int meta, unsigned click_count, double x, double y)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
-	LogicalScrollPane *scrolls = LOGICAL_SCROLL_PANE(gtk_widget_get_parent(widget));
-	GtkAdjustment *vadjustment = logical_scroll_pane_get_vadjustment(scrolls);
-	double yadj = round(vadjustment->value);
+	double yadj = this->vadjustment ? round(this->vadjustment->value) : 0.0;
 	int r0 = (int)yadj;
 	int r = (int)y * this->nrows / (this->viewport_h + 1);
 	int c = (int)x * this->ncols / (this->viewport_w + 1);
@@ -355,6 +613,7 @@ select_clicked_character(GtkWidget *widget, int meta, unsigned click_count, doub
 		if (this->selection_callback)
 			(*this->selection_callback)(selected, get_codepoint(this, selected), meta, click_count >= 2u);
 		this->multiclick_count = click_count == 1u ? 1u : 0u;
+		gcmap_char_table_update_magnification(this);
 		gtk_widget_queue_draw(GTK_WIDGET(this)); /* XXX just redraw the affected cells */
 	} else if (click_count > this->multiclick_count) {
 		goto clicked;
@@ -367,6 +626,7 @@ select_clicked_character(GtkWidget *widget, int meta, unsigned click_count, doub
 static gboolean
 gcmap_char_table_button_press(GtkWidget *widget, GdkEventButton *event, void *user_data)
 {
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
 	unsigned click_count;
 	(void) user_data;
 	gtk_widget_grab_focus(widget);
@@ -377,10 +637,43 @@ gcmap_char_table_button_press(GtkWidget *widget, GdkEventButton *event, void *us
 		case GDK_2BUTTON_PRESS:  click_count = 2u;  break;
 		case GDK_3BUTTON_PRESS:  click_count = 3u;  break;
 		}
+		if (event->button == 3)
+			this->right_button_down = 1;
 		select_clicked_character(widget, !!(event->state & GDK_MOD1_MASK), click_count, event->x, event->y);
+		gcmap_char_table_update_magnification(this);
 	} else {
-		GCMAP_CHAR_TABLE(widget)->multiclick_count = 0u;
+		this->multiclick_count = 0u;
 	}
+	return TRUE;
+}
+
+
+static gboolean
+gcmap_char_table_button_release(GtkWidget *widget, GdkEventButton *event, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	(void) user_data;
+	if (event->button != 3)
+		return FALSE;
+	this->right_button_down = 0;
+	gcmap_char_table_update_magnification(this);
+	return TRUE;
+}
+
+
+static gboolean
+gcmap_char_table_motion_notify(GtkWidget *widget, GdkEventMotion *event, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	(void) user_data;
+	if (!this->right_button_down)
+		return FALSE;
+	if (!(event->state & GDK_BUTTON3_MASK)) {
+		this->right_button_down = 0;
+		gcmap_char_table_update_magnification(this);
+		return FALSE;
+	}
+	select_clicked_character(widget, !!(event->state & GDK_MOD1_MASK), 1u, event->x, event->y);
 	return TRUE;
 }
 
@@ -393,8 +686,14 @@ gcmap_char_table_key_press(GtkWidget *widget, GdkEventKey *event, void *user_dat
 
 	(void) user_data;
 
-        if (event->state & GDK_CONTROL_MASK)
-                return FALSE;
+	if (IS_SHIFT_KEY(event->keyval)) {
+		this->shift_keys |= SHIFT_KEY(event->keyval);
+		gcmap_char_table_update_magnification(this);
+		return TRUE;
+	}
+
+	if (event->state & GDK_CONTROL_MASK)
+		return FALSE;
 
 	meta = !!(event->state & GDK_MOD1_MASK);
 
@@ -419,6 +718,106 @@ gcmap_char_table_key_press(GtkWidget *widget, GdkEventKey *event, void *user_dat
 }
 
 
+static gboolean
+gcmap_char_table_key_release(GtkWidget *widget, GdkEventKey *event, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	(void) user_data;
+	if (IS_SHIFT_KEY(event->keyval)) {
+		this->shift_keys &= ~SHIFT_KEY(event->keyval);
+		gcmap_char_table_update_magnification(this);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+
+static gboolean
+gcmap_char_table_focus_out(GtkWidget *widget, GdkEventFocus *event, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	(void) event;
+	(void) user_data;
+	this->shift_keys = 0u;
+	this->right_button_down = 0;
+	gcmap_char_table_update_magnification(this);
+	return FALSE;
+}
+
+
+static gboolean
+gcmap_char_table_focus_in(GtkWidget *widget, GdkEventFocus *event, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	GdkModifierType modifiers;
+	(void) event;
+	(void) user_data;
+	gdk_window_get_pointer(widget->window, NULL, NULL, &modifiers);
+	this->shift_keys = modifiers & GDK_SHIFT_MASK ? 1u : 0u;
+	gcmap_char_table_update_magnification(this);
+	return FALSE;
+}
+
+
+static void
+gcmap_char_table_vadjustment_value_changed(GtkAdjustment *adjustment, CharTable *this)
+{
+	uint32_t first, last, column, cell;
+	double yadj;
+	int row, yadj_int;
+
+	if (!this->nchars)
+		return;
+
+	yadj = round(adjustment->value);
+	yadj_int = (int)yadj;
+
+	row = MAX(yadj_int, 0);
+	first = (uint32_t)row * (uint32_t)this->ncols;
+	last = first + (uint32_t)this->nrows * (uint32_t)this->ncols - 1u;
+	last = MIN(last, this->nchars - 1u);
+	column = this->selected % (uint32_t)this->ncols;
+
+	if (this->selected < first) {
+		cell = first + column;
+	} else if (this->selected > last) {
+		cell = last - (last % (uint32_t)this->ncols);
+		cell += column;
+	} else {
+		gcmap_char_table_update_magnification(this);
+		gtk_widget_queue_draw(GTK_WIDGET(this));
+		return;
+	}
+
+	cell = MIN(cell, last);
+	gcmap_char_table_select_cell(this, (int32_t)cell, 1, 0);
+}
+
+
+static void
+gcmap_char_table_parent_set(GtkWidget *widget, GtkWidget *old_parent, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	GtkWidget *parent = gtk_widget_get_parent(widget);
+
+	(void) old_parent;
+	(void) user_data;
+
+	if (this->vadjustment_value_changed_id) {
+		g_signal_handler_disconnect(this->vadjustment, this->vadjustment_value_changed_id);
+		this->vadjustment_value_changed_id = 0u;
+	}
+	this->vadjustment = NULL;
+
+	if (!parent || !LOGICAL_IS_SCROLL_PANE(parent))
+		return;
+
+	this->vadjustment = logical_scroll_pane_get_vadjustment(LOGICAL_SCROLL_PANE(parent));
+	this->vadjustment_value_changed_id = g_signal_connect(this->vadjustment, "value-changed",
+	                                                      G_CALLBACK(&gcmap_char_table_vadjustment_value_changed), this);
+}
+
+
 static void
 gcmap_char_table_init(CharTable *this)
 {
@@ -433,6 +832,13 @@ gcmap_char_table_init(CharTable *this)
 	this->selected = 0u;
 	this->ranges = NULL;
 	this->nranges = 0u;
+	this->magnification_layout = NULL;
+	this->magnification_window = NULL;
+	this->magnification = NULL;
+	this->vadjustment = NULL;
+	this->vadjustment_value_changed_id = 0u;
+	this->shift_keys = 0u;
+	this->right_button_down = 0;
 	this->viewport_w = 1;
 	this->viewport_h = 1;
 	this->snap_cols_to_2pow = 0;
@@ -445,11 +851,20 @@ gcmap_char_table_init(CharTable *this)
 
 	gtk_widget_add_events(widget,
 	                      GDK_BUTTON_PRESS_MASK |
+	                      GDK_BUTTON_RELEASE_MASK |
+	                      GDK_BUTTON3_MOTION_MASK |
 	                      GDK_KEY_PRESS_MASK |
+	                      GDK_KEY_RELEASE_MASK |
 	                      GDK_FOCUS_CHANGE_MASK);
 
 	g_signal_connect(widget, "button-press-event", G_CALLBACK(&gcmap_char_table_button_press), NULL);
+	g_signal_connect(widget, "button-release-event", G_CALLBACK(&gcmap_char_table_button_release), NULL);
+	g_signal_connect(widget, "motion-notify-event", G_CALLBACK(&gcmap_char_table_motion_notify), NULL);
 	g_signal_connect(widget, "key-press-event", G_CALLBACK(&gcmap_char_table_key_press), NULL);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(&gcmap_char_table_key_release), NULL);
+	g_signal_connect(widget, "focus-in-event", G_CALLBACK(&gcmap_char_table_focus_in), NULL);
+	g_signal_connect(widget, "focus-out-event", G_CALLBACK(&gcmap_char_table_focus_out), NULL);
+	g_signal_connect(widget, "parent-set", G_CALLBACK(&gcmap_char_table_parent_set), NULL);
 }
 
 
@@ -457,6 +872,12 @@ static void
 gcmap_char_table_dispose(GObject *object)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(object);
+	if (this->magnification_window) {
+		gtk_widget_destroy(this->magnification_window);
+		this->magnification_window = NULL;
+		this->magnification = NULL;
+	}
+	g_clear_object(&this->magnification_layout);
 	g_clear_object(&this->layout);
 	G_OBJECT_CLASS(gcmap_char_table_parent_class)->dispose(object);
 }
@@ -491,6 +912,7 @@ gcmap_char_table_set_font_family(CharTable *this, const char *family)
 	pango_layout_context_changed(this->layout);
 	update_cell_size(GTK_WIDGET(this), 0);
 	update_content_size(this);
+	gcmap_char_table_update_magnification(this);
 	gtk_widget_queue_draw(GTK_WIDGET(this));
 }
 
@@ -504,6 +926,7 @@ gcmap_char_table_set_font_weight(CharTable *this, PangoWeight weight)
 	pango_font_description_set_weight(this->font, this->font_weight);
 	pango_layout_set_font_description(this->layout, this->font);
 	pango_layout_context_changed(this->layout);
+	gcmap_char_table_update_magnification(this);
 	gtk_widget_queue_draw(GTK_WIDGET(this));
 }
 
@@ -517,6 +940,7 @@ gcmap_char_table_set_font_style(CharTable *this, PangoStyle style)
 	pango_font_description_set_style(this->font, this->font_style);
 	pango_layout_set_font_description(this->layout, this->font);
 	pango_layout_context_changed(this->layout);
+	gcmap_char_table_update_magnification(this);
 	gtk_widget_queue_draw(GTK_WIDGET(this));
 }
 
@@ -534,6 +958,7 @@ gcmap_char_table_set_font_size(CharTable *this, int size)
 	widget = GTK_WIDGET(this);
 	update_cell_size(widget, 0);
 	update_content_size(this);
+	gcmap_char_table_update_magnification(this);
 	gtk_widget_queue_draw(widget);
 }
 
@@ -564,16 +989,24 @@ void
 gcmap_char_table_set_ranges(CharTable *this, const struct libcmap_range *ranges, size_t nranges)
 {
 	GtkWidget *widget;
+	uint32_t codepoint, selected;
+
 	if (this->ranges == ranges && this->nranges == nranges)
 		return;
+
+	codepoint = this->nchars ? get_codepoint(this, this->selected) : 0u;
 	this->ranges = ranges;
 	this->nranges = nranges;
 	this->selected = 0u;
+	if (this->nchars && find_codepoint_index(this, codepoint, &selected))
+		this->selected = selected;
+
 	widget = GTK_WIDGET(this);
 	update_cell_size(widget, 1);
 	update_content_size(this);
 	if (this->selection_callback)
 		(*this->selection_callback)(this->selected, get_codepoint(this, this->selected), 0, 0);
+	gcmap_char_table_update_magnification(this);
 	gtk_widget_queue_draw(widget);
 }
 
@@ -585,6 +1018,7 @@ gcmap_char_table_viewport_updated(CharTable *this, int viewport_w, int viewport_
 	this->viewport_h = viewport_h;
 	update_cell_size(GTK_WIDGET(this), 0);
 	update_content_size(this);
+	gcmap_char_table_update_magnification(this);
 }
 
 
@@ -609,6 +1043,20 @@ gcmap_char_table_new(const char *font_family, int font_size, PangoWeight font_we
 	this->layout = gtk_widget_create_pango_layout(widget, "");
 	if (!this->layout)
 		eprintf("gtk_widget_create_pango_layout:");
+	this->magnification_layout = gtk_widget_create_pango_layout(widget, "");
+	if (!this->magnification_layout)
+		eprintf("gtk_widget_create_pango_layout:");
+
+	this->magnification_window = gtk_window_new(GTK_WINDOW_POPUP);
+	gtk_window_set_wmclass(GTK_WINDOW(this->magnification_window), "gcmap", "gcmap");
+	gtk_window_set_role(GTK_WINDOW(this->magnification_window), "magnification");
+	gtk_window_set_decorated(GTK_WINDOW(this->magnification_window), FALSE);
+	gtk_window_set_resizable(GTK_WINDOW(this->magnification_window), FALSE);
+	gtk_window_set_type_hint(GTK_WINDOW(this->magnification_window), GDK_WINDOW_TYPE_HINT_TOOLTIP);
+	this->magnification = gtk_drawing_area_new();
+	gtk_widget_set_size_request(this->magnification, MAGNIFICATION_WIDTH, MAGNIFICATION_HEIGHT);
+	gtk_container_add(GTK_CONTAINER(this->magnification_window), this->magnification);
+	g_signal_connect(this->magnification, "expose-event", G_CALLBACK(&gcmap_char_table_magnification_expose), this);
 
 	return widget;
 }
@@ -618,9 +1066,7 @@ void
 gcmap_char_table_select_cell(CharTable *this, int32_t selected, int clamp, int meta)
 {
 	GtkWidget *widget = GTK_WIDGET(this);
-	LogicalScrollPane *scrolls = LOGICAL_SCROLL_PANE(gtk_widget_get_parent(widget));
-	GtkAdjustment *vadjustment = logical_scroll_pane_get_vadjustment(scrolls);
-	double yadj = round(vadjustment->value);
+	double yadj = this->vadjustment ? round(this->vadjustment->value) : 0.0;
 	int r0 = MAX((int)yadj, 0);
 	int r = r0;
 	int32_t first, last;
@@ -659,12 +1105,13 @@ gcmap_char_table_select_cell(CharTable *this, int32_t selected, int clamp, int m
 	this->selected = (uint32_t)selected;
 	if (this->selection_callback)
 		(*this->selection_callback)(this->selected, get_codepoint(this, this->selected), meta, 0);
+	gcmap_char_table_update_magnification(this);
 
 	if (r == r0) {
 		gtk_widget_queue_draw(widget); /* XXX just redraw the affected cells */
-	} else {
+	} else if (this->vadjustment) {
 		yadj = (double)r;
-		gtk_adjustment_set_value(vadjustment, yadj);
+		gtk_adjustment_set_value(this->vadjustment, yadj);
 	}
 }
 
@@ -680,19 +1127,10 @@ gcmap_char_table_adjust_cell_selection(CharTable *this, int32_t adjustment, int 
 int
 gcmap_char_table_select_codepoint(CharTable *this, uint32_t codepoint)
 {
-	size_t i = 0u;
-	uint32_t index = 0u;
-
-	while (i < this->nranges && codepoint > this->ranges[i].last) {
-		index += (uint32_t)LIBCMAP_RANGE_SIZE(&this->ranges[i]);
-		i += 1u;
+	uint32_t index;
+	if (find_codepoint_index(this, codepoint, &index)) {
+		gcmap_char_table_select_cell(this, (int32_t)index, 0, 0);
+		return 1;
 	}
-
-	if (i >= this->nranges || codepoint < this->ranges[i].first)
-		return 0;
-
-	index += codepoint - this->ranges[i].first;
-
-	gcmap_char_table_select_cell(this, (int32_t)index, 0, 0);
-	return 1;
+	return 0;
 }

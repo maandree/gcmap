@@ -19,6 +19,13 @@ typedef struct _CharTable {
 	int viewport_w, viewport_h;
 	PangoFontDescription *font;
 	PangoLayout *layout;
+	PangoLayout *magnification_layout;
+	GtkWidget *magnification_window;
+	GtkWidget *magnification;
+	GtkAdjustment *vadjustment;
+	unsigned long int vadjustment_value_changed_id;
+	unsigned shift_keys;
+	int right_button_down;
 	int font_size;
 	int snap_cols_to_2pow;
 	int snap_rows_to_2pow;
