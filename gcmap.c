@@ -21,6 +21,9 @@ enum listing {
 #define NLISTINGS_X(...) (size_t)1
 #define NLISTINGS (LIST_LISTINGS(NLISTINGS_X, +))
 
+#define LEFT_TO_RIGHT_OVERRIDE     "\xe2\x80\xad"
+#define POP_DIRECTIONAL_FORMATTING "\xe2\x80\xac"
+
 
 static const struct libcmap_block all_block = {.name = "All", .range = LIBCMAP_UNIVERSE_RANGE};
 
@@ -198,11 +201,16 @@ format_xml_dec(char *buf, uint32_t cp, const char *prefix, const char *suffix)
 static void
 update_details(void)
 {
+	enum libcmap_bidirectional_category bidirectional_category;
 	struct libcmap_codepoint_data *data;
+	const struct libcmap_block *block;
+	const struct libcmap_script *script;
+	size_t i, first_script2 = SIZE_MAX;
+	enum codepoint_class class;
 	GtkTextIter itr, itr_end, itr0;
 	GtkTextMark *mark;
 	char buf[128u];
-	int len;
+	int len, printed_first_script2 = 0;
 
 	/* XXX this should be defered to when the tab is open (being opened if it is not already opened) */
 
@@ -215,19 +223,20 @@ update_details(void)
 	if (!data)
 		return;
 
+	/* XXX when this text is copied, LEFT-TO-RIGHT OVERRIDE and POP DIRECTIONAL FORMATTING shall not be copied */
 	len = 0;
-	len = (int)(stpcpy(&buf[len], "\xe2\x80\xad" /* LEFT-TO-RIGHT OVERRIDE */ ) - buf);
-	switch (classify_from_codepoint_data(data)) {
+	class = classify_from_codepoint_data(data);
+	switch (class) {
 	case CP_COMBINING_MARK:
-#if MARK_BASE
-		len += g_unichar_to_utf8(MARK_BASE, &buf[len]);
-#endif
-		/* fall through */
-
 	case CP_REGULAR:
 	case CP_RESERVED:
+		len = (int)(stpcpy(&buf[len], LEFT_TO_RIGHT_OVERRIDE) - buf);
+#if MARK_BASE
+		if (class == CP_COMBINING_MARK)
+			len += g_unichar_to_utf8(MARK_BASE, &buf[len]);
+#endif
 		len += g_unichar_to_utf8((gunichar)selected_codepoint, &buf[len]);
-		len = (int)(stpcpy(&buf[len], "\xe2\x80\xac" /* POP DIRECTIONAL FORMATTING */) - buf);
+		len = (int)(stpcpy(&buf[len], POP_DIRECTIONAL_FORMATTING) - buf);
 		buf[len++] = '\n';
 		buf[len] = '\0';
 		gtk_text_buffer_insert_with_tags(details_buffer, &itr, buf, -1, tag_display, NULL);
@@ -265,9 +274,87 @@ update_details(void)
 
 	gtk_text_buffer_insert_with_tags_by_name(details_buffer, &itr, "General character properties\n", -1, "header", NULL);
 	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
-	gtk_text_buffer_insert(details_buffer, &itr, "TODO\n", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "General category: ", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, libcmap_general_category_string(data->general_category &
+	                                                                             LIBCMAP_GENERAL_SUPERCATEGORY_MASK), -1);
+	gtk_text_buffer_insert(details_buffer, &itr, ", ", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, libcmap_general_category_string(data->general_category), -1);
+	if (data->general_category == LIBCMAP_GENERAL_CATEGORY_OTHER_NOT_ASSIGNED)
+		gtk_text_buffer_insert(details_buffer, &itr, data->noncharacter ? ", Non-character" : ", Reserved", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+	if (data->bidirectional_category) {
+		gtk_text_buffer_insert(details_buffer, &itr, "Bidirectional category: ", -1);
+		bidirectional_category = data->bidirectional_category;
+		gtk_text_buffer_insert(details_buffer, &itr, libcmap_bidirectional_category_string(bidirectional_category), -1);
+		gtk_text_buffer_insert(details_buffer, &itr, " (", -1);
+		bidirectional_category &= LIBCMAP_BIDIRECTIONAL_SUPERCATEGORY_MASK;
+		gtk_text_buffer_insert(details_buffer, &itr, libcmap_bidirectional_category_string(bidirectional_category), -1);
+		gtk_text_buffer_insert(details_buffer, &itr, ")\n", -1);
+	}
+	/* XXX data->decomposition_mapping, data->decomposition_mapping_size, data->decomposition_type */
+	/* XXX data->simple_uppercase_mapping */
+	/* XXX data->simple_lowercase_mapping */
+	/* XXX data->simple_titlecase_mapping */
+	/* XXX data->canonical_combining_classes */
+	/* XXX data->bidirectional_mirrored */
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
 
-	/* TODO list block and scripts */
+	if (data->unicode_1_name) {
+		gtk_text_buffer_insert(details_buffer, &itr, "Unicode 1.0 name: ", -1);
+		gtk_text_buffer_insert(details_buffer, &itr, data->unicode_1_name, -1);
+		gtk_text_buffer_insert(details_buffer, &itr, "\n\n", -1);
+	}
+
+	if (data->numeric_value) {
+		gtk_text_buffer_insert(details_buffer, &itr, "Numeric value: ", -1);
+		gtk_text_buffer_insert(details_buffer, &itr, data->numeric_value, -1);
+		gtk_text_buffer_insert(details_buffer, &itr, "\nNumeric type: ", -1);
+		gtk_text_buffer_insert(details_buffer, &itr, libcmap_numeric_type_string(data->numeric_type), -1);
+		gtk_text_buffer_insert(details_buffer, &itr, "\n\n", -1);
+	}
+
+	block = libcmap_find_block(selected_codepoint, NULL);
+	gtk_text_buffer_insert(details_buffer, &itr, "Unicode block: ", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, block ? block->name : "(none)", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+
+	script = libcmap_find_script(selected_codepoint, NULL, NULL);
+	for (i = 0u; i < libcmap_script_list_size; i++) {
+		if (script && i == (size_t)(script - libcmap_script_list))
+			continue;
+		if (!is_in_script(selected_codepoint, &libcmap_script_list[i]))
+			continue;
+		if (first_script2 == SIZE_MAX) {
+			first_script2 = i;
+		} else if (printed_first_script2) {
+			goto print_secondary_script;
+		} else {
+			printed_first_script2 = 1;
+			gtk_text_buffer_insert(details_buffer, &itr, "Primary Unicode script: ", -1);
+			gtk_text_buffer_insert(details_buffer, &itr, script ? script->name : "(none)", -1);
+			gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+			gtk_text_buffer_insert(details_buffer, &itr, "Secondary Unicode scripts:\n\t", -1);
+			gtk_text_buffer_insert(details_buffer, &itr, libcmap_script_list[first_script2].name, -1);
+			gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+		print_secondary_script:
+			gtk_text_buffer_insert(details_buffer, &itr, "\t", -1);
+			gtk_text_buffer_insert(details_buffer, &itr, libcmap_script_list[i].name, -1);
+			gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+		}
+	}
+	if (!printed_first_script2) {
+		if (first_script2 != SIZE_MAX)
+			gtk_text_buffer_insert(details_buffer, &itr, "Primary Unicode script: ", -1);
+		else
+			gtk_text_buffer_insert(details_buffer, &itr, "Unicode script: ", -1);
+		gtk_text_buffer_insert(details_buffer, &itr, script ? script->name : "(none)", -1);
+		gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+		if (first_script2 != SIZE_MAX) {
+			gtk_text_buffer_insert(details_buffer, &itr, "Secondary Unicode scripts: ", -1);
+			gtk_text_buffer_insert(details_buffer, &itr, libcmap_script_list[first_script2].name, -1);
+			gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+		}
+	}
 
 	if (is_surrogate(selected_codepoint))
 		return;

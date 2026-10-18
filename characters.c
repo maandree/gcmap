@@ -78,3 +78,20 @@ classify_codepoint(uint32_t cp)
 {
 	return classify_from_codepoint_data(get_codepoint_data(cp));
 }
+
+
+int
+is_in_script(uint32_t cp, const struct libcmap_script *script)
+{
+	size_t i;
+	if (!script->nranges)
+		return 0;
+	if (script->ranges[0].first > cp)
+		return 0;
+	if (cp > script->ranges[script->nranges - 1u].last)
+		return 0;
+	for (i = 0u; i < script->nranges; i++)
+		if (script->ranges[i].first <= cp && cp <= script->ranges[i].last)
+			return 1;
+	return 0;
+}

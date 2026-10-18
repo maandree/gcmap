@@ -61,6 +61,7 @@ CONST int is_valid_codepoint(uint32_t cp);
 struct libcmap_codepoint_data *get_codepoint_data(uint32_t cp);
 PURE enum codepoint_class classify_from_codepoint_data(const struct libcmap_codepoint_data *data);
 enum codepoint_class classify_codepoint(uint32_t cp);
+PURE int is_in_script(uint32_t cp, const struct libcmap_script *script);
 
 /* colour.c */
 double srgb_encode_unsigned(double t);
