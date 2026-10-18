@@ -699,15 +699,18 @@ gcmap_char_table_button_press(GtkWidget *widget, GdkEventButton *event, void *us
 	switch (event->button) {
 	case 3:
 		this->right_button_down = 1;
-		/* fall through */
+		this->multiclick_count = 0u;
+		click_count = 0;
+		goto select;
 	case 1:
-		gtk_widget_grab_focus(widget);
 		switch ((unsigned)event->type) {
 		default:
 		case GDK_BUTTON_PRESS:   click_count = 1u;  break;
 		case GDK_2BUTTON_PRESS:  click_count = 2u;  break;
 		case GDK_3BUTTON_PRESS:  click_count = 3u;  break;
 		}
+	select:
+		gtk_widget_grab_focus(widget);
 		meta = !!(event->state & GDK_MOD1_MASK);
 		is_a_cell = select_clicked_character(widget, meta, click_count, event->x, event->y);
 		gcmap_char_table_update_magnification(this);

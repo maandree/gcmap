@@ -1742,7 +1742,11 @@ main(int argc, char *argv[])
 	groups_tooltips = group_tooltips[listing];
 	ngroups_tooltips = ngroup_tooltips[listing];
 
+#if 0
 	select_group_for_codepoint(listing, selected_codepoint, 1);
+#else
+	select_group(0);
+#endif
 	GCMAP_CHAR_TABLE(chartable)->selection_callback = &character_cell_selected;
 	gcmap_char_table_select_codepoint(GCMAP_CHAR_TABLE(chartable), selected_codepoint);
 
