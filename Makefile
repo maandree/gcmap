@@ -29,6 +29,7 @@ gcmap: $(OBJ)
 install: gcmap
 	mkdir -p -- "$(DESTDIR)$(PREFIX)/bin"
 	mkdir -p -- "$(DESTDIR)$(MANPREFIX)/man1/"
+	mkdir -p -- "$(DESTDIR)$(PREFIX)/share/applications/"
 	cp -- gcmap "$(DESTDIR)$(PREFIX)/bin/"
 	cp -- gcmap.1 "$(DESTDIR)$(MANPREFIX)/man1/"
 	cp -- gcmap.desktop "$(DESTDIR)$(PREFIX)/share/applications/"
