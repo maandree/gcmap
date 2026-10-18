@@ -10,6 +10,14 @@
 #define GCMAP_CHAR_TABLE_GET_CLASS(OBJ)  (G_TYPE_INSTANCE_GET_CLASS((OBJ), GCMAP_TYPE_CHAR_TABLE, CharTableClass))
 
 
+enum char_table_selection_type {
+	COPY_TO_TEXTFIELD,
+	COPY_TO_PRIMARY,
+	COPY_TO_SECONDARY,
+	DRAG_ANNOUNCEMENT
+};
+
+
 typedef struct _CharTable {
 	GtkDrawingArea parent_instance;
 	int nrows, ncols;
@@ -26,15 +34,18 @@ typedef struct _CharTable {
 	unsigned long int vadjustment_value_changed_id;
 	unsigned shift_keys;
 	int right_button_down;
+	uint32_t pointer_cell;
 	int font_size;
 	int snap_cols_to_2pow;
 	int snap_rows_to_2pow;
+	int drag_x, drag_y, drag_stage;
+	GtkTargetList *drag_targets;
 	unsigned multiclick_count;
 	PangoWeight font_weight;
 	PangoStyle font_style;
 	const struct libcmap_range *ranges;
 	size_t nranges;
-	void (*selection_callback)(uint32_t index, uint32_t codepoint, int meta, int copy_to_text_field);
+	void (*selection_callback)(uint32_t index, uint32_t codepoint, enum char_table_selection_type selection_type);
 } CharTable;
 
 typedef struct _CharTableClass {
@@ -49,6 +60,7 @@ void gcmap_char_table_set_font_family(CharTable *this, const char *family);
 void gcmap_char_table_set_font_weight(CharTable *this, PangoWeight weight);
 void gcmap_char_table_set_font_style(CharTable *this, PangoStyle style);
 void gcmap_char_table_set_font_size(CharTable *this, int size);
+void gcmap_char_table_set_font_size_at_pointer(CharTable *this, int size, double x, double y);
 void gcmap_char_table_set_snap_cols_to_2pow(CharTable *this, int active);
 void gcmap_char_table_set_snap_rows_to_2pow(CharTable *this, int active);
 void gcmap_char_table_set_ranges(CharTable *this, const struct libcmap_range *ranges, size_t nranges);

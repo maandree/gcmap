@@ -8,7 +8,12 @@
 #define CELL_Y_CLEARANCE     2
 #define MAGNIFICATION_WIDTH  200
 #define MAGNIFICATION_HEIGHT 200
+#define DRAG_WIDTH           100
+#define DRAG_HEIGHT          100
+#define DRAG_X               -16
+#define DRAG_Y               -16
 
+#define TEXT_LIMIT 32u
 #define IS_SHIFT_KEY(KEYVAL) ((KEYVAL) == GDK_KEY_Shift_L || (KEYVAL) == GDK_KEY_Shift_R)
 #define SHIFT_KEY(KEYVAL) (1u << ((KEYVAL) == GDK_KEY_Shift_R))
 
@@ -42,26 +47,30 @@ G_DEFINE_TYPE(CharTable, gcmap_char_table, GTK_TYPE_DRAWING_AREA)
 
 
 static int
-is_noncharacter(gunichar ch)
+format_character(uint32_t cp, char *buf)
 {
-	return (0xFDD0u <= ch && ch <= 0xFDEFu) || (ch & 0xFFFEu) == 0xFFFEu;
-}
+	int len = 0;
 
+	switch (classify_codepoint(cp)) {
+	case CP_COMBINING_MARK:
+#if MARK_BASE
+		len += g_unichar_to_utf8(MARK_BASE, &buf[len]);
+#endif
+		/* fall through */
 
-static int
-is_printable_character(gunichar ch)
-{
-	return g_unichar_validate(ch) &&
-	       !g_unichar_iscntrl(ch) &&
-	       !g_unichar_iszerowidth(ch) &&
-	       !is_noncharacter(ch);
-}
+	case CP_REGULAR:
+	case CP_RESERVED:
+		len += g_unichar_to_utf8((gunichar)cp, &buf[len]);
+		break;
 
+	case CP_CONTROL:
+	case CP_SURROGATE:
+	case CP_NONCHARACTER:
+	case CP_OUT_OF_RANGE:
+	default:
+		break;
+	}
 
-static int
-format_character(gunichar ch, char *buf)
-{
-	int len = is_printable_character(ch) ? g_unichar_to_utf8(ch, buf) : 0;
 	buf[len] = '\0';
 	return len;
 }
@@ -105,6 +114,22 @@ find_codepoint_index(CharTable *this, uint32_t codepoint, uint32_t *index_out)
 		return 0;
 	*index_out = index + codepoint - this->ranges[i].first;
 	return 1;
+}
+
+
+static void
+execute_selection_callback(CharTable *this, uint32_t cell, int meta, int copy_to_text_field)
+{
+	uint32_t codepoint;
+	if (!this->selection_callback)
+		return;
+	codepoint = get_codepoint(this, cell);
+	if (copy_to_text_field)
+		(*this->selection_callback)(cell, codepoint, COPY_TO_TEXTFIELD);
+	else if (meta)
+		(*this->selection_callback)(cell, codepoint, COPY_TO_SECONDARY);
+	else
+		(*this->selection_callback)(cell, codepoint, COPY_TO_PRIMARY);
 }
 
 
@@ -187,7 +212,7 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 	GdkRectangle area = event->area;
 	GtkStyle *style = gtk_widget_get_style(widget);
 	cairo_t *g;
-	char text[16];
+	char text[TEXT_LIMIT];
 	int r, c, x0, x1, y0, y1, text_w, text_h;
 	size_t skip, range, row_skip, max_jump, jump;
 	uint32_t cp, index;
@@ -274,7 +299,7 @@ gcmap_char_table_expose(GtkWidget *widget, GdkEventExpose *event)
 				set_source_colour(g, &style->text[selectedState]);
 			}
 
-			format_character((gunichar)cp, text);
+			format_character(cp, text);
 			fit_text(this, text, &text_w, &text_h);
 			cairo_move_to(g, (x0 + x1 - text_w) / 2, (y0 + y1 - text_h) / 2);
 			pango_cairo_show_layout(g, this->layout);
@@ -318,10 +343,10 @@ get_selected_cell_screen_rectangle(CharTable *this, int *x_out, int *y_out, int 
 
 
 static int
-fit_magnification(CharTable *this, const char *text, int text_len, struct glyph_layout *layout_out)
+fit_magnification(CharTable *this, const char *text, int text_len, int width, int height, struct glyph_layout *layout_out)
 {
-	const int max_w = MAGNIFICATION_WIDTH  - CELL_X_CLEARANCE * 2;
-	const int max_h = MAGNIFICATION_HEIGHT - CELL_Y_CLEARANCE * 2;
+	const int max_w = width  - CELL_X_CLEARANCE * 2;
+	const int max_h = height - CELL_Y_CLEARANCE * 2;
 	int font_size = this->font_size * PANGO_SCALE;
 	PangoFontDescription *font;
 	double xscale, yscale;
@@ -377,35 +402,24 @@ fit_magnification(CharTable *this, const char *text, int text_len, struct glyph_
 }
 
 
-static gboolean
-gcmap_char_table_magnification_expose(GtkWidget *widget, GdkEventExpose *event, void *user_data)
+static void
+draw_magnification(CharTable *this, cairo_t *g, int width, int height)
 {
-	CharTable *this = user_data;
 	GtkStyle *style = gtk_widget_get_style(GTK_WIDGET(this));
-	cairo_t *g;
-	char text[16];
+	char text[TEXT_LIMIT];
 	int text_len;
 	struct glyph_layout layout;
-	const double w = (double)MAGNIFICATION_WIDTH;
-	const double h = (double)MAGNIFICATION_HEIGHT;
+	const double w = (double)width;
+	const double h = (double)height;
 
-	g = gdk_cairo_create(widget->window);
-	if (!g) {
-		weprintf("gdk_cairo_create:");
-		return FALSE;
-	}
-
-	text_len = format_character((gunichar)get_codepoint(this, this->selected), text);
-	if (fit_magnification(this, text, text_len, &layout) < 0)
-		return FALSE;
-
-	gdk_cairo_rectangle(g, &event->area);
-	cairo_clip(g);
 	set_source_colour(g, &style->base[GTK_STATE_NORMAL]);
 	cairo_paint(g);
-
 	if (!this->nchars)
-		goto out;
+		return;
+
+	text_len = format_character(get_codepoint(this, this->selected), text);
+	if (fit_magnification(this, text, text_len, width, height, &layout) < 0)
+		return;
 
 	set_source_colour_blend(g, &style->base[GTK_STATE_NORMAL], 0.05, &style->text[GTK_STATE_NORMAL]);
 	cairo_set_line_width(g, 1.0);
@@ -424,13 +438,26 @@ gcmap_char_table_magnification_expose(GtkWidget *widget, GdkEventExpose *event, 
 
 	set_source_colour(g, &style->text[GTK_STATE_NORMAL]);
 	cairo_save(g);
-	cairo_translate(g, 0.5 * ((double)MAGNIFICATION_WIDTH  - layout.width)  + layout.x,
-	                   0.5 * ((double)MAGNIFICATION_HEIGHT - layout.height) + layout.y);
+	cairo_translate(g, 0.5 * (w - layout.width)  + layout.x,
+	                   0.5 * (h - layout.height) + layout.y);
 	cairo_scale(g, layout.scale, layout.scale);
 	pango_cairo_show_layout(g, this->magnification_layout);
 	cairo_restore(g);
+}
 
-out:
+
+static gboolean
+gcmap_char_table_magnification_expose(GtkWidget *widget, GdkEventExpose *event, void *user_data)
+{
+	CharTable *this = user_data;
+	cairo_t *g = gdk_cairo_create(widget->window);
+	if (!g) {
+		weprintf("gdk_cairo_create:");
+		return FALSE;
+	}
+	gdk_cairo_rectangle(g, &event->area);
+	cairo_clip(g);
+	draw_magnification(this, g, MAGNIFICATION_WIDTH, MAGNIFICATION_HEIGHT);
 	cairo_destroy(g);
 	return FALSE;
 }
@@ -593,6 +620,44 @@ gcmap_char_table_size_request(GtkWidget *widget, GtkRequisition *requisition)
 
 
 static void
+gcmap_char_table_drag_begin(GtkWidget *widget, GdkDragContext *context, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	GdkPixmap *pixmap;
+	cairo_t *g;
+	uint32_t codepoint;
+
+	(void) user_data;
+
+	if (!this->nchars)
+		return;
+
+	codepoint = get_codepoint(this, this->selected);
+	if (!is_valid_codepoint(codepoint))
+		return;
+
+	pixmap = gdk_pixmap_new(widget->window, DRAG_WIDTH, DRAG_HEIGHT, -1);
+	if (!pixmap)
+		return;
+
+	g = gdk_cairo_create(pixmap);
+	if (!g) {
+		g_object_unref(pixmap);
+		return;
+	}
+	draw_magnification(this, g, DRAG_WIDTH, DRAG_HEIGHT);
+	cairo_destroy(g);
+
+	gtk_drag_set_icon_pixmap(context, gtk_widget_get_colormap(widget), pixmap, NULL, DRAG_X, DRAG_Y);
+	g_object_unref(pixmap);
+
+	this->shift_keys = 0u;
+	this->right_button_down = 0;
+	gcmap_char_table_update_magnification(this);
+}
+
+
+static int
 select_clicked_character(GtkWidget *widget, int meta, unsigned click_count, double x, double y)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
@@ -606,12 +671,12 @@ select_clicked_character(GtkWidget *widget, int meta, unsigned click_count, doub
 	selected = ((uint32_t)r + (uint32_t)r0) * (uint32_t)this->ncols + (uint32_t)c;
 	if (selected >= this->nchars) {
 		this->multiclick_count = 0u;
+		return 0;
 	} else if (selected != this->selected) {
 		click_count = 1u;
 	clicked:
 		this->selected = selected;
-		if (this->selection_callback)
-			(*this->selection_callback)(selected, get_codepoint(this, selected), meta, click_count >= 2u);
+		execute_selection_callback(this, selected, meta, click_count >= 2u);
 		this->multiclick_count = click_count == 1u ? 1u : 0u;
 		gcmap_char_table_update_magnification(this);
 		gtk_widget_queue_draw(GTK_WIDGET(this)); /* XXX just redraw the affected cells */
@@ -620,6 +685,7 @@ select_clicked_character(GtkWidget *widget, int meta, unsigned click_count, doub
 	} else {
 		this->multiclick_count = 0u;
 	}
+	return 1;
 }
 
 
@@ -628,23 +694,33 @@ gcmap_char_table_button_press(GtkWidget *widget, GdkEventButton *event, void *us
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
 	unsigned click_count;
+	int meta, is_a_cell;
 	(void) user_data;
-	gtk_widget_grab_focus(widget);
-	if (event->button == 1 || event->button == 3) {
+	switch (event->button) {
+	case 3:
+		this->right_button_down = 1;
+		/* fall through */
+	case 1:
+		gtk_widget_grab_focus(widget);
 		switch ((unsigned)event->type) {
 		default:
 		case GDK_BUTTON_PRESS:   click_count = 1u;  break;
 		case GDK_2BUTTON_PRESS:  click_count = 2u;  break;
 		case GDK_3BUTTON_PRESS:  click_count = 3u;  break;
 		}
-		if (event->button == 3)
-			this->right_button_down = 1;
-		select_clicked_character(widget, !!(event->state & GDK_MOD1_MASK), click_count, event->x, event->y);
+		meta = !!(event->state & GDK_MOD1_MASK);
+		is_a_cell = select_clicked_character(widget, meta, click_count, event->x, event->y);
 		gcmap_char_table_update_magnification(this);
-	} else {
+		if (is_a_cell && event->button == 1 && event->type == GDK_BUTTON_PRESS) {
+			this->drag_x = (int)event->x;
+			this->drag_y = (int)event->y;
+			this->drag_stage = 1;
+		}
+		return TRUE;
+	default:
 		this->multiclick_count = 0u;
+		return event->button != 2;
 	}
-	return TRUE;
 }
 
 
@@ -653,6 +729,8 @@ gcmap_char_table_button_release(GtkWidget *widget, GdkEventButton *event, void *
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
 	(void) user_data;
+	if (event->button == 1)
+		this->drag_stage = 0;
 	if (event->button != 3)
 		return FALSE;
 	this->right_button_down = 0;
@@ -665,7 +743,37 @@ static gboolean
 gcmap_char_table_motion_notify(GtkWidget *widget, GdkEventMotion *event, void *user_data)
 {
 	CharTable *this = GCMAP_CHAR_TABLE(widget);
-	(void) user_data;
+	uint32_t codepoint;
+	GdkDragContext *drag_ctx;
+
+	this->pointer_cell = UINT32_MAX;
+
+	if (this->drag_stage == 1 && (event->state & GDK_BUTTON1_MASK)) {
+		if (!gtk_drag_check_threshold(widget, this->drag_x, this->drag_y, (int)event->x, (int)event->y))
+			goto not_starting_drag;
+		this->drag_stage = 2;
+
+		if (!this->nchars)
+			goto cannot_drag;
+
+		codepoint = get_codepoint(this, this->selected);
+		if (this->selection_callback)
+			(*this->selection_callback)(this->selected, codepoint, DRAG_ANNOUNCEMENT);
+		if (!is_valid_codepoint(codepoint))
+			goto cannot_drag;
+
+		drag_ctx = gtk_drag_begin(widget, this->drag_targets, GDK_ACTION_COPY, 1, (GdkEvent *)event);
+		if (!drag_ctx)
+			goto cannot_drag;
+
+		gcmap_char_table_drag_begin(widget, drag_ctx, user_data);
+		return TRUE;
+
+	cannot_drag:
+		this->drag_stage = 0;
+	}
+
+not_starting_drag:
 	if (!this->right_button_down)
 		return FALSE;
 	if (!(event->state & GDK_BUTTON3_MASK)) {
@@ -707,8 +815,7 @@ gcmap_char_table_key_press(GtkWidget *widget, GdkEventKey *event, void *user_dat
 	case GDK_KEY_Return: case GDK_KEY_KP_Enter:
 	case GDK_KEY_Begin:  case GDK_KEY_KP_Begin:
 	case GDK_KEY_space:
-		if (this->selection_callback)
-			(*this->selection_callback)(this->selected, get_codepoint(this, this->selected), meta, 1);
+		execute_selection_callback(this, this->selected, meta, 1);
 		break;
 	default:
 		return FALSE;
@@ -819,9 +926,34 @@ gcmap_char_table_parent_set(GtkWidget *widget, GtkWidget *old_parent, void *user
 
 
 static void
+gcmap_char_table_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *selection_data,
+                               unsigned int info, unsigned int time, void *user_data)
+{
+	CharTable *this = GCMAP_CHAR_TABLE(widget);
+	char text[TEXT_LIMIT];
+	uint32_t codepoint;
+	int text_len;
+	(void) context;
+	(void) info;
+	(void) time;
+	(void) user_data;
+	if (!this->nchars)
+		return;
+	codepoint = get_codepoint(this, this->selected);
+	if (!is_valid_codepoint(codepoint))
+		return;
+	text_len = g_unichar_to_utf8((gunichar)codepoint, text);
+	gtk_selection_data_set_text(selection_data, text, text_len);
+}
+
+
+
+static void
 gcmap_char_table_init(CharTable *this)
 {
+	static char utf8_string[] = "UTF8_STRING";
 	GtkWidget *widget = GTK_WIDGET(this);
+	GtkTargetEntry drag_target = {utf8_string, 0, 0};
 
 	this->nrows = 1;
 	this->ncols = 1;
@@ -839,10 +971,14 @@ gcmap_char_table_init(CharTable *this)
 	this->vadjustment_value_changed_id = 0u;
 	this->shift_keys = 0u;
 	this->right_button_down = 0;
+	this->pointer_cell = UINT32_MAX;
 	this->viewport_w = 1;
 	this->viewport_h = 1;
 	this->snap_cols_to_2pow = 0;
 	this->snap_rows_to_2pow = 0;
+	this->drag_x = 0;
+	this->drag_y = 0;
+	this->drag_stage = 0;
 	this->multiclick_count = 0u;
 	this->selection_callback = NULL;
 
@@ -852,11 +988,17 @@ gcmap_char_table_init(CharTable *this)
 	gtk_widget_add_events(widget,
 	                      GDK_BUTTON_PRESS_MASK |
 	                      GDK_BUTTON_RELEASE_MASK |
+	                      GDK_POINTER_MOTION_MASK |
 	                      GDK_BUTTON3_MOTION_MASK |
 	                      GDK_KEY_PRESS_MASK |
 	                      GDK_KEY_RELEASE_MASK |
 	                      GDK_FOCUS_CHANGE_MASK);
 
+	this->drag_targets = gtk_target_list_new(&drag_target, 1u);
+	if (!this->drag_targets)
+		eprintf("gtk_target_list_new:");
+
+	g_signal_connect(widget, "drag-data-get", G_CALLBACK(&gcmap_char_table_drag_data_get), NULL);
 	g_signal_connect(widget, "button-press-event", G_CALLBACK(&gcmap_char_table_button_press), NULL);
 	g_signal_connect(widget, "button-release-event", G_CALLBACK(&gcmap_char_table_button_release), NULL);
 	g_signal_connect(widget, "motion-notify-event", G_CALLBACK(&gcmap_char_table_motion_notify), NULL);
@@ -879,6 +1021,8 @@ gcmap_char_table_dispose(GObject *object)
 	}
 	g_clear_object(&this->magnification_layout);
 	g_clear_object(&this->layout);
+	gtk_target_list_unref(this->drag_targets);
+	this->drag_targets = NULL;
 	G_OBJECT_CLASS(gcmap_char_table_parent_class)->dispose(object);
 }
 
@@ -964,6 +1108,69 @@ gcmap_char_table_set_font_size(CharTable *this, int size)
 
 
 void
+gcmap_char_table_set_font_size_at_pointer(CharTable *this, int size, double x, double y)
+{
+	int row, col, row0, px, py, prow, crow;
+	double value, upper, yadj;
+	uint32_t cell;
+
+	if (!this->nchars || !this->vadjustment || this->font_size == MAX(size, 1)) {
+		gcmap_char_table_set_font_size(this, size);
+		return;
+	}
+
+	px = (int)x;
+	py = (int)y;
+
+	if (this->pointer_cell < this->nchars) {
+		cell = this->pointer_cell;
+	} else {
+		yadj = round(MAX(this->vadjustment->value, 0.0));
+		row0 = (int)yadj;
+
+		row = py * this->nrows / (this->viewport_h + 1);
+		col = px * this->ncols / (this->viewport_w + 1);
+		row = MAX(row, 0);
+		col = MAX(col, 0);
+		row = MIN(row, this->nrows - 1);
+		col = MIN(col, this->ncols - 1);
+
+		cell = ((uint32_t)row + (uint32_t)row0) * (uint32_t)this->ncols + (uint32_t)col;
+		cell = MIN(cell, this->nchars - 1u);
+		this->pointer_cell = cell;
+	}
+
+	gcmap_char_table_set_font_size(this, size);
+
+	yadj = round(MAX(this->vadjustment->value, 0.0));
+	row0 = (int)yadj;
+	crow = (int)(cell / (uint32_t)this->ncols) - row0;
+	crow = MAX(crow, 0);
+	prow = py * this->nrows / (this->viewport_h + 1);
+	prow = MAX(prow, 0);
+	prow = MIN(prow, this->nrows - 1);
+	row0 = crow - prow + row0;
+
+	row = (int)(this->selected / (uint32_t)this->ncols);
+	if (row < row0) {
+		this->selected = (uint32_t)row0 * (uint32_t)this->ncols;
+	} else if (row >= row0 + this->nrows) {
+		this->selected = (uint32_t)row0 + (uint32_t)this->nrows;
+		this->selected *= (uint32_t)this->ncols;
+		if (this->selected)
+			this->selected -= 1u;
+	}
+	this->selected = MIN(this->selected, this->nchars);
+
+	value = (double)row0;
+	upper = this->vadjustment->upper - this->vadjustment->page_size;
+	value = MAX(value, this->vadjustment->lower);
+	value = MIN(value, upper);
+	gtk_adjustment_set_value(this->vadjustment, value);
+}
+
+
+void
 gcmap_char_table_set_snap_cols_to_2pow(CharTable *this, int active)
 {
 	GtkWidget *widget = GTK_WIDGET(this);
@@ -1004,8 +1211,7 @@ gcmap_char_table_set_ranges(CharTable *this, const struct libcmap_range *ranges,
 	widget = GTK_WIDGET(this);
 	update_cell_size(widget, 1);
 	update_content_size(this);
-	if (this->selection_callback)
-		(*this->selection_callback)(this->selected, get_codepoint(this, this->selected), 0, 0);
+	execute_selection_callback(this, this->selected, 0, 0);
 	gcmap_char_table_update_magnification(this);
 	gtk_widget_queue_draw(widget);
 }
@@ -1103,8 +1309,7 @@ gcmap_char_table_select_cell(CharTable *this, int32_t selected, int clamp, int m
 	}
 
 	this->selected = (uint32_t)selected;
-	if (this->selection_callback)
-		(*this->selection_callback)(this->selected, get_codepoint(this, this->selected), meta, 0);
+	execute_selection_callback(this, this->selected, meta, 0);
 	gcmap_char_table_update_magnification(this);
 
 	if (r == r0) {

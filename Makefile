@@ -5,13 +5,16 @@ include $(CONFIGFILE)
 
 OBJ =\
 	gcmap.o\
+	characters.o\
 	char-table.o\
-	logical-scroll-pane.o\
-	colour.o
+	colour.o\
+	filtered-combo.o\
+	logical-scroll-pane.o
 
 HDR =\
 	common.h\
 	char-table.h\
+	filtered-combo.h\
 	logical-scroll-pane.h
 
 all: gcmap

@@ -1,8 +1,6 @@
-Middle-clicking should find the character stored in PRIMARY (SECONDARY if Mod1 is held down)
-
-Add drag-and-drop support, both in to find a character and out to copy a character
-
 Add bookmarks expander under the tabbed pane
+
+Display in magnification popup what font the glyph is rendered with
 
 Mark whenever a fallback font is used for a glyph
 
@@ -19,15 +17,6 @@ Add font blacklist
 
 Add support for command line operands: select listed fonts by path
 
-Add editor to font drop-down to make it easier to select a font
-
-Scrolling inside a GtkScrolledWindow or LogicalScrollPane shall steal focus (gtk_widget_grab_focus)
-
-Scrolling with Control held down shall change zoom. The hovered cell shall
-remain visible, preferably at the same Y position as the pointer. The pointer
-shall jump to the new position of the cell so account for it being impossible
-to ensure that cell remains at the same X position as the pointer.
-
 Under "Go" add option to go to the same character in:
 	- All
 	- Block
@@ -38,3 +27,23 @@ Under "Go" add option to go to the same character in:
 Add command line options for opening into a specific character or codepoint
 
 Fix XXX's
+
+There are several minor problems with the font combo
+
+Certain categories of specials characters are not rendered,
+such as those in the block Tags, even due it may be helpful
+
+Dragging above or below the char table with the right button shall scroll it;
+the rate shall depend on the distance from the edge compared to the distance
+to the edge of the monitor
+
+Add search feature
+
+When a grapheme composition is displayed in the status bar,
+it should be possible to click on the codepoints to inspect
+individual codepoints combined in the grapheme. Hovering
+one of them ought also bring up a magnification that instead
+of displaying the used front, displays the character name.
+
+Along with "Scripts" and "Unicode blocks" there should be
+"Bookmarked scripts" and "Bookmarked blocks"

@@ -47,9 +47,13 @@ static GtkWidget *vtabtext;
 static GtkWidget *snap2_cols;
 static GtkWidget *snap2_rows;
 static GtkWidget *chartable;
-static GtkListStore *fontcombo_store;
+static GtkWidget *details;
 static GtkAdjustment *fontsize_adjustment;
 static GtkAccelGroup *accelgroup;
+static GtkTextBuffer *details_buffer;
+static GtkTextTag *tag_display;
+static GtkTextTag *tag_name;
+static GtkTextTag *tag_header;
 
 static uint32_t selected_codepoint = 0u;
 static int switching_groups = 0;
@@ -66,7 +70,7 @@ static size_t ngroups_tooltips;
 static size_t
 format_statusbar_message(char *buffer, size_t size)
 {
-	const struct libcmap_codepoint_data *data;
+	struct libcmap_codepoint_data *data;
 	int r;
 	size_t len = 0u;
 
@@ -77,7 +81,7 @@ format_statusbar_message(char *buffer, size_t size)
 	buffer = &buffer[MIN(size, (size_t)r)];
 	size -= MIN(size, (size_t)r);
 
-	data = libcmap_find_codepoint_data(selected_codepoint);
+	data = get_codepoint_data(selected_codepoint);
 	if (!data)
 		return len;
 
@@ -104,8 +108,186 @@ update_statusbar(void)
 }
 
 
+static const char *
+format_utf8_hex(char *buf, uint32_t cp, const char *prefix, const char *suffix)
+{
+	char utf8[8];
+	int r, i, len = g_unichar_to_utf8((gunichar)cp, utf8);
+	char *p = stpcpy(buf, prefix);
+	for (i = 0; i < len; i++) {
+		if (i)
+			*p++ = ' ';
+		r = sprintf(p, "%02X", (unsigned char)utf8[i] & 0xFFu);
+		if (r < 0)
+			eprintf("sprintf:");
+		p += r;
+	}
+	stpcpy(p, suffix);
+	return buf;
+}
+
+
+static const char *
+format_utf8_hexesc(char *buf, uint32_t cp, const char *prefix, const char *suffix)
+{
+	char utf8[8];
+	int r, i, len = g_unichar_to_utf8((gunichar)cp, utf8);
+	char *p = stpcpy(buf, prefix);
+	for (i = 0; i < len; i++) {
+		r = sprintf(p, "\\x%02X", (unsigned char)utf8[i] & 0xFFu);
+		if (r < 0)
+			eprintf("sprintf:");
+		p += r;
+	}
+	stpcpy(p, suffix);
+	return buf;
+}
+
+
+static const char *
+format_utf8_octesc(char *buf, uint32_t cp, const char *prefix, const char *suffix)
+{
+	char utf8[8];
+	int r, i, len = g_unichar_to_utf8((gunichar)cp, utf8);
+	char *p = stpcpy(buf, prefix);
+	for (i = 0; i < len; i++) {
+		r = sprintf(p, "\\%03o", (unsigned char)utf8[i] & 0xFFu);
+		if (r < 0)
+			eprintf("sprintf:");
+		p += r;
+	}
+	stpcpy(p, suffix);
+	return buf;
+}
+
+
+static const char *
+format_utf16_hex(char *buf, uint32_t cp, const char *prefix, const char *suffix)
+{
+	char *p = stpcpy(buf, prefix);
+	int r;
+	if (cp <= UINT32_C(0xFFFF)) {
+		r = sprintf(p, "%04"PRIX32, cp);
+	} else {
+		cp -= UINT32_C(0x10000);
+		r = sprintf(p, "%04"PRIX32" %04"PRIX32,
+		            (uint32_t)((cp >> 10) + 0xD800u),
+		            (uint32_t)((cp & 0x3FFu) + 0xDC00u));
+	}
+	if (r < 0)
+		eprintf("sprintf:");
+	p += r;
+	stpcpy(p, suffix);
+	return buf;
+}
+
+
+static const char *
+format_xml_dec(char *buf, uint32_t cp, const char *prefix, const char *suffix)
+{
+	char *p = stpcpy(stpcpy(buf, prefix), "&#");
+	int r = sprintf(p, "%"PRIu32, cp);
+	if (r < 0)
+		eprintf("sprintf:");
+	p += r;
+	stpcpy(stpcpy(p, ";"), suffix);
+	return buf;
+}
+
+
 static void
-character_cell_selected(uint32_t index, uint32_t codepoint, int meta, int copy_to_text_field)
+update_details(void)
+{
+	struct libcmap_codepoint_data *data;
+	GtkTextIter itr, itr_end, itr0;
+	GtkTextMark *mark;
+	char buf[128u];
+	int len;
+
+	/* XXX this should be defered to when the tab is open (being opened if it is not already opened) */
+
+	gtk_text_buffer_get_start_iter(details_buffer, &itr);
+	gtk_text_buffer_get_end_iter(details_buffer, &itr_end);
+
+	gtk_text_buffer_delete(details_buffer, &itr, &itr_end);
+
+	data = get_codepoint_data(selected_codepoint);
+	if (!data)
+		return;
+
+	len = 0;
+	len = (int)(stpcpy(&buf[len], "\xe2\x80\xad" /* LEFT-TO-RIGHT OVERRIDE */ ) - buf);
+	switch (classify_from_codepoint_data(data)) {
+	case CP_COMBINING_MARK:
+#if MARK_BASE
+		len += g_unichar_to_utf8(MARK_BASE, &buf[len]);
+#endif
+		/* fall through */
+
+	case CP_REGULAR:
+	case CP_RESERVED:
+		len += g_unichar_to_utf8((gunichar)selected_codepoint, &buf[len]);
+		len = (int)(stpcpy(&buf[len], "\xe2\x80\xac" /* POP DIRECTIONAL FORMATTING */) - buf);
+		buf[len++] = '\n';
+		buf[len] = '\0';
+		gtk_text_buffer_insert_with_tags(details_buffer, &itr, buf, -1, tag_display, NULL);
+		break;
+
+	case CP_CONTROL:
+	case CP_SURROGATE:
+	case CP_NONCHARACTER:
+	case CP_OUT_OF_RANGE:
+	default:
+		gtk_text_buffer_insert(details_buffer, &itr, "[non-printable character]\n", -1);
+		break;
+	}
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+
+	mark = gtk_text_buffer_create_mark(details_buffer, NULL, &itr, TRUE);
+	len = 0;
+	buf[len++] = 'U';
+	buf[len++] = '+';
+	if (selected_codepoint >> 20)  buf[len++] = "0123456789ABCDEF"[(selected_codepoint >> 20) & 15u];
+	if (selected_codepoint >> 16)  buf[len++] = "0123456789ABCDEF"[(selected_codepoint >> 16) & 15u];
+	buf[len++] = "0123456789ABCDEF"[(selected_codepoint >> 12) & 15u];
+	buf[len++] = "0123456789ABCDEF"[(selected_codepoint >>  8) & 15u];
+	buf[len++] = "0123456789ABCDEF"[(selected_codepoint >>  4) & 15u];
+	buf[len++] = "0123456789ABCDEF"[(selected_codepoint >>  0) & 15u];
+	buf[len++] = ' ';
+	gtk_text_buffer_insert(details_buffer, &itr, buf, len);
+	gtk_text_buffer_insert(details_buffer, &itr, data->name, -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+	gtk_text_buffer_get_iter_at_mark(details_buffer, &itr0, mark);
+	gtk_text_buffer_apply_tag(details_buffer, tag_name, &itr0, &itr);
+	gtk_text_buffer_delete_mark(details_buffer, mark);
+
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+
+	gtk_text_buffer_insert_with_tags_by_name(details_buffer, &itr, "General character properties\n", -1, "header", NULL);
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "TODO\n", -1);
+
+	/* TODO list block and scripts */
+
+	if (is_surrogate(selected_codepoint))
+		return;
+
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+	gtk_text_buffer_insert_with_tags_by_name(details_buffer, &itr, "Various encodings\n", -1, "header", NULL);
+	gtk_text_buffer_insert(details_buffer, &itr, "\n", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "UTF-8:\n", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, format_utf8_hex(buf, selected_codepoint, "\t", "\n"), -1);
+	gtk_text_buffer_insert(details_buffer, &itr, format_utf8_hexesc(buf, selected_codepoint, "\t", "\n"), -1);
+	gtk_text_buffer_insert(details_buffer, &itr, format_utf8_octesc(buf, selected_codepoint, "\t", "\n"), -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "\nUTF-16:\n", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, format_utf16_hex(buf, selected_codepoint, "\t", "\n"), -1);
+	gtk_text_buffer_insert(details_buffer, &itr, "\nXML:\n", -1);
+	gtk_text_buffer_insert(details_buffer, &itr, format_xml_dec(buf, selected_codepoint, "\t", "\n"), -1);
+}
+
+
+static void
+character_cell_selected(uint32_t index, uint32_t codepoint, enum char_table_selection_type selection_type)
 {
 	GtkEditable *editable;
 	char text[16];
@@ -113,38 +295,247 @@ character_cell_selected(uint32_t index, uint32_t codepoint, int meta, int copy_t
 
 	(void) index;
 
-	text[len = g_unichar_to_utf8(codepoint, text)] = '\0';
 	selected_codepoint = codepoint;
 
-	if (copy_to_text_field) {
+	if (!is_valid_codepoint(codepoint)) {
+		switch (selection_type) {
+		case COPY_TO_TEXTFIELD:
+		case COPY_TO_SECONDARY:
+		case DRAG_ANNOUNCEMENT:
+			gtk_statusbar_pop(GTK_STATUSBAR(statusbar), 0u);
+			gtk_statusbar_push(GTK_STATUSBAR(statusbar), 0u, "Cannot copy non-character codepoint");
+			return;
+		default:
+		case COPY_TO_PRIMARY:
+			goto out;
+		}
+	}
+
+	text[len = g_unichar_to_utf8(codepoint, text)] = '\0';
+
+	switch (selection_type) {
+	case COPY_TO_TEXTFIELD:
 		editable = GTK_EDITABLE(copytext);
 		pos = gtk_editable_get_position(editable);
 		gtk_editable_insert_text(editable, text, len, &pos);
 		gtk_editable_set_position(editable, pos);
-	} else if (meta) {
-		gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_SECONDARY), text, len);
-		/* XXX add setting to swap SECONDARY and PRIMARY */
-	} else {
+		break;
+	case COPY_TO_PRIMARY:
 		gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_PRIMARY), text, len);
 		/* XXX add setting to disable */
+		break;
+	case COPY_TO_SECONDARY:
+		gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_SECONDARY), text, len);
+		/* XXX add setting to swap SECONDARY and PRIMARY */
+		break;
+	case DRAG_ANNOUNCEMENT:
+		return;
 	}
 
+out:
 	update_statusbar();
+	update_details();
+}
+
+
+static void
+select_group(int index)
+{
+	GtkTreeView *treeview = GTK_TREE_VIEW(grouplist);
+	GtkTreePath *path = gtk_tree_path_new_from_indices(index, -1);
+	GtkTreeSelection *selection = gtk_tree_view_get_selection(treeview);
+	gtk_tree_selection_select_path(selection, path);
+	gtk_tree_view_set_cursor(treeview, path, NULL, FALSE);
+	gtk_tree_path_free(path);
+}
+
+
+static void
+select_group_for_codepoint(enum listing listing, uint32_t codepoint, int fallback_to_all)
+{
+	const struct libcmap_block *block;
+	const struct libcmap_script *script;
+	switch (listing) {
+	case BY_BLOCK:
+		block = libcmap_find_block(codepoint, NULL);
+		select_group(block ? (int)(block - libcmap_block_list) + 1 :
+		             fallback_to_all ? 0 : (int)libcmap_block_list_size + 1);
+		break;
+	case BY_SCRIPT:
+		script = libcmap_find_script(codepoint, NULL, NULL);
+		select_group(script ? (int)(script - libcmap_script_list) + 1 :
+		             fallback_to_all ? 0 : (int)libcmap_script_list_size + 1);
+		break;
+	default:
+		abort();
+	}
 }
 
 
 static int
-populate_font_families(GtkWidget *widget, GtkListStore *store, const char **selectedp)
+get_codepoint(const char **textp, uint32_t *codepoint_out)
+{
+	static const uint32_t limits[] = {
+		(UINT32_C(1) <<  0) - 1u,
+		(UINT32_C(1) <<  7) - 1u,
+		(UINT32_C(1) << 11) - 1u,
+		(UINT32_C(1) << 16) - 1u,
+		UINT32_C(0x10FFFF)
+	};
+
+	const unsigned char *text = (const unsigned char *)*textp;
+	uint32_t lower_limit, upper_limit;
+	unsigned char c;
+	size_t n;
+
+	c = *text++;
+
+	n = 0u;
+	while (c & 0x80u) {
+		c <<= 1;
+		n += 1u;
+	}
+
+	if (n == 0u) {
+		*codepoint_out = (uint32_t)c;
+		goto out;
+	}
+	if (n == 1u || n >= ELEMSOF(limits))
+		return 0;
+
+	lower_limit = limits[n - 1u] + 1u;
+	upper_limit = limits[n];
+
+	*codepoint_out = (uint32_t)((c & 0xFFu) >> n);
+
+	while (--n) {
+		c = *text++;
+		if ((c & 0xC0u) != 0x80u)
+			return 0;
+		*codepoint_out <<= 6;
+		*codepoint_out |= (uint32_t)(c & 0x7Fu);
+	}
+
+	if (*codepoint_out < lower_limit || *codepoint_out > upper_limit)
+		return 0;
+
+out:
+	*textp = (const char *)text;
+	return 1;
+}
+
+
+static int
+jump_to_character(const char *text)
+{
+#define TEXT_HEAD "Grapheme composition:"
+#define CP_HEAD " U+"
+#define ELLIPSIS " …"
+
+	uint32_t codepoints[32];
+	char *p, composition[sizeof(TEXT_HEAD ELLIPSIS) + ELEMSOF(codepoints) * (sizeof(CP_HEAD"10FFFF") - 1u)];
+	size_t i, n = 0u;
+	int r, listing, ellipsis;
+
+	if (!text || !*text)
+		return 0;
+
+	if (text[grapheme_next_character_break_utf8(text, SIZE_MAX)])
+		return 0;
+
+	for (; *text && n < ELEMSOF(codepoints); n++)
+		if (!get_codepoint(&text, &codepoints[n]))
+			return 0;
+	if (!n)
+		return 0;
+	ellipsis = !!*text;
+
+	if (gcmap_char_table_select_codepoint(GCMAP_CHAR_TABLE(chartable), codepoints[0]))
+		goto out;
+	listing = gtk_combo_box_get_active(GTK_COMBO_BOX(listcombo));
+	select_group_for_codepoint((enum listing)listing, codepoints[0], 0);
+	gcmap_char_table_select_codepoint(GCMAP_CHAR_TABLE(chartable), codepoints[0]);
+
+out:
+	if (n > 1u) {
+		p = stpcpy(composition, TEXT_HEAD);
+		for (i = 0u; i < n; i++) {
+			r = sprintf(p, "%s%04"PRIX32, CP_HEAD, codepoints[i]);
+			if (r < 0) {
+				weprintf("sprintf:");
+				return 1;
+			}
+			p = &p[r];
+		}
+		if (ellipsis)
+			stpcpy(composition, ELLIPSIS);
+		gtk_statusbar_pop(GTK_STATUSBAR(statusbar), 0u);
+		gtk_statusbar_push(GTK_STATUSBAR(statusbar), 0u, composition);
+	}
+
+	return 1;
+
+#undef TEXT_HEAD
+#undef CP_HEAD
+#undef ELLIPSIS
+}
+
+
+static void
+chartable_drag_data_received(GtkWidget *widget, GdkDragContext *context, int x, int y,
+                             GtkSelectionData *selection_data, unsigned int info, unsigned int time, void *user_data)
+{
+	unsigned char *text = gtk_selection_data_get_text(selection_data);
+	int success = text != NULL;
+	(void) widget;
+	(void) x;
+	(void) y;
+	(void) info;
+	(void) user_data;
+	if (text) {
+		success = jump_to_character((char *)text);
+		g_free(text);
+	}
+	gtk_drag_finish(context, success, FALSE, time);
+}
+
+
+static void
+chartable_clipboard_text_received(GtkClipboard *clipboard, const char *text, void *user_data)
+{
+	(void) clipboard;
+	(void) user_data;
+	if (text)
+		jump_to_character(text);
+}
+
+
+static gboolean
+chartable_button_press(GtkWidget *widget, GdkEventButton *event, void *user_data)
+{
+	int meta = !!(event->state & GDK_MOD1_MASK);
+	GdkAtom selection = meta ? GDK_SELECTION_SECONDARY : GDK_SELECTION_PRIMARY;
+	(void) user_data;
+	if (event->button == 2 && event->type == GDK_BUTTON_PRESS) {
+		gtk_widget_grab_focus(widget);
+		gtk_clipboard_request_text(gtk_clipboard_get(selection), &chartable_clipboard_text_received, widget);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+
+static int
+populate_font_families(FilteredCombo *combo, const char **selectedp)
 {
 	const char **names;
 	PangoFontFamily **families;
 	int nfamilies_int;
 	size_t i, nfamilies;
-	GtkTreeIter iter;
 	size_t selected_index = SIZE_MAX;
 	size_t default_index = SIZE_MAX;
 
-	pango_context_list_families(gtk_widget_get_pango_context(GTK_WIDGET(widget)), &families, &nfamilies_int);
+	pango_context_list_families(gtk_widget_get_pango_context(GTK_WIDGET(combo)), &families, &nfamilies_int);
 	nfamilies = (size_t)nfamilies_int;
 	if (nfamilies == 0u)
 		eprintf("no fonts available");
@@ -153,9 +544,8 @@ populate_font_families(GtkWidget *widget, GtkListStore *store, const char **sele
 	for (i = 0u; i < nfamilies; i++)
 		names[i] = pango_font_family_get_name(families[i]);
 	libsimple_qsort_str(names, nfamilies);
-	for (i = 0; i < nfamilies; i++) {
-		gtk_list_store_append(store, &iter);
-		gtk_list_store_set(store, &iter, 0, names[i], -1);
+	for (i = 0u; i < nfamilies; i++) {
+		filtered_combo_append(combo, names[i]);
 		if (selected_index == SIZE_MAX && !strcasecmp(names[i], *selectedp))
 			selected_index = i;
 		if (default_index == SIZE_MAX && !strcasecmp(names[i], DEFAULT_FONT_FAMILY))
@@ -172,18 +562,6 @@ populate_font_families(GtkWidget *widget, GtkListStore *store, const char **sele
 	g_free(families);
 
 	return (int)selected_index;
-}
-
-
-static void
-select_group(int index)
-{
-	GtkTreeView *treeview = GTK_TREE_VIEW(grouplist);
-	GtkTreePath *path = gtk_tree_path_new_from_indices(index, -1);
-	GtkTreeSelection *selection = gtk_tree_view_get_selection(treeview);
-	gtk_tree_selection_select_path(selection, path);
-	gtk_tree_view_set_cursor(treeview, path, NULL, FALSE);
-	gtk_tree_path_free(path);
 }
 
 
@@ -431,16 +809,10 @@ copybutton_clicked(GtkWidget *button, GtkEditable *editable)
 
 
 static void
-fontcombo_changed(GtkComboBox *combo, void *user_data)
+fontcombo_changed(FilteredCombo *combo, const char *family, void *user_data)
 {
-	GtkTreeIter iter;
-	char *family;
+	(void) combo;
 	(void) user_data;
-	if (!gtk_combo_box_get_active_iter(combo, &iter))
-		return;
-	gtk_tree_model_get(GTK_TREE_MODEL(fontcombo_store), &iter, 0, &family, -1);
-	if (!family)
-		return;
 	gcmap_char_table_set_font_family(GCMAP_CHAR_TABLE(chartable), family);
 }
 
@@ -474,6 +846,48 @@ fontsize_changed(GtkAdjustment *adjustment, void *user_data)
 }
 
 
+static gboolean
+scroll_grab_focus(GtkWidget *widget, GdkEventScroll *event, void *user_data)
+{
+	(void) event;
+	(void) user_data;
+	gtk_widget_grab_focus(widget);
+	return FALSE;
+}
+
+
+static gboolean
+chartable_scroll(GtkWidget *widget, GdkEventScroll *event, void *user_data)
+{
+	double size;
+
+	(void) user_data;
+
+	if (!(event->state & GDK_CONTROL_MASK))
+		return FALSE;
+
+	if (event->state & (GDK_SHIFT_MASK | GDK_MOD1_MASK | GDK_BUTTON3_MASK))
+		return FALSE;
+
+	size = gtk_adjustment_get_value(fontsize_adjustment);
+	switch (event->direction) {
+	case GDK_SCROLL_UP:    size += fontsize_adjustment->step_increment;  break;
+	case GDK_SCROLL_DOWN:  size -= fontsize_adjustment->step_increment;  break;
+	case GDK_SCROLL_LEFT:
+	case GDK_SCROLL_RIGHT:
+	default:
+		return FALSE;
+	}
+
+	if (size < fontsize_adjustment->lower)  return TRUE;
+	if (size > fontsize_adjustment->upper)  return TRUE;
+
+	gcmap_char_table_set_font_size_at_pointer(GCMAP_CHAR_TABLE(widget), (int)size, event->x, event->y);
+	gtk_adjustment_set_value(fontsize_adjustment, size);
+	return TRUE;
+}
+
+
 static void
 listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 {
@@ -486,8 +900,6 @@ listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 	GtkTreeModel *model;
 	GtkTreePath *path;
 	GtkTreeIter iter;
-	const struct libcmap_block *block;
-	const struct libcmap_script *script;
 	uint32_t codepoint = selected_codepoint;
 
 	if (recursion_guard)
@@ -526,22 +938,10 @@ listcombo_changed(GtkComboBox *combo, GtkListStore *store)
 
 	switching_groups--;
 
-	if (all_selected) {
+	if (all_selected)
 		select_group(0);
-	} else {
-		switch ((enum listing)listing) {
-		case BY_BLOCK:
-			block = libcmap_find_block(codepoint, NULL);
-			select_group((block ? (int)(block - libcmap_block_list) : (int)libcmap_block_list_size) + 1);
-			break;
-		case BY_SCRIPT:
-			script = libcmap_find_script(codepoint, NULL, NULL);
-			select_group((script ? (int)(script - libcmap_script_list) : (int)libcmap_script_list_size) + 1);
-			break;
-		default:
-			abort();
-		}
-	}
+	else
+		select_group_for_codepoint((enum listing)listing, codepoint, 0);
 
 	recursion_guard--;
 }
@@ -962,17 +1362,11 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	accessible = gtk_widget_get_accessible(GTK_WIDGET(hbox));
 	atk_object_set_name(accessible, "Font");
 
-	fontcombo = gtk_combo_box_new();
-	renderer = gtk_cell_renderer_text_new();
-	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(fontcombo), renderer, TRUE);
-	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(fontcombo), renderer, "text", 0, NULL);
-	fontcombo_store = gtk_list_store_new(1, G_TYPE_STRING);
-	gtk_combo_box_set_model(GTK_COMBO_BOX(fontcombo), GTK_TREE_MODEL(fontcombo_store));
-	default_font_index = populate_font_families(fontcombo, fontcombo_store, &default_font);
-	gtk_combo_box_set_focus_on_click(GTK_COMBO_BOX(fontcombo), FALSE);
+	fontcombo = filtered_combo_new();
+	default_font_index = populate_font_families(FILTERED_COMBO(fontcombo), &default_font);
+	filtered_combo_set_active(FILTERED_COMBO(fontcombo), default_font_index);
+	default_font = filtered_combo_get_selected(FILTERED_COMBO(fontcombo));
 	gtk_box_pack_start(GTK_BOX(hbox), fontcombo, FALSE, FALSE, 0);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(fontcombo), default_font_index);
-	g_signal_connect(fontcombo, "changed", G_CALLBACK(&fontcombo_changed), NULL);
 	accessible = gtk_widget_get_accessible(fontcombo);
 	atk_object_set_name(accessible, "Font family");
 
@@ -1015,6 +1409,7 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	column = gtk_tree_view_column_new_with_attributes(NULL, renderer, "text", 0, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(grouplist), column);
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(grouplist), FALSE);
+	g_signal_connect(grouplist, "scroll-event", G_CALLBACK(&scroll_grab_focus), NULL);
 	g_signal_connect(grouplist, "query-tooltip", G_CALLBACK(&grouplist_query_tooltip), NULL);
 	gtk_widget_set_has_tooltip(GTK_WIDGET(grouplist), TRUE);
 	g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(grouplist)), "changed",
@@ -1031,17 +1426,29 @@ create_window(const char *default_font, PangoWeight default_weight, PangoStyle d
 	scrolled = logical_scroll_pane_new();
 	logical_scroll_pane_set_hscrollbar_visible(LOGICAL_SCROLL_PANE(scrolled), FALSE);
 	chartable = gcmap_char_table_new(default_font, (int)default_font_size, default_weight, default_style);
+	gtk_drag_dest_set(chartable, GTK_DEST_DEFAULT_ALL, NULL, 0, GDK_ACTION_COPY);
+	gtk_drag_dest_add_text_targets(chartable);
+	g_signal_connect(chartable, "drag-data-received", G_CALLBACK(&chartable_drag_data_received), NULL);
+	g_signal_connect(chartable, "button-press-event", G_CALLBACK(&chartable_button_press), NULL);
+	g_signal_connect(fontcombo, "changed", G_CALLBACK(&fontcombo_changed), NULL);
+	g_signal_connect(chartable, "scroll-event", G_CALLBACK(&scroll_grab_focus), NULL);
 	logical_scroll_pane_set_child(LOGICAL_SCROLL_PANE(scrolled), chartable);
+	g_signal_connect(chartable, "scroll-event", G_CALLBACK(&chartable_scroll), NULL);
 	g_signal_connect(chartable, "size-allocate", G_CALLBACK(&chartable_size_allocate), NULL);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _table"));
 
-#ifdef TODO
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
-	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_NONE);
-	gtk_container_add(GTK_CONTAINER(scrolled), gtk_label_new("todo"));
+	details = gtk_text_view_new();
+	gtk_text_view_set_editable(GTK_TEXT_VIEW(details), FALSE);
+	gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(details), FALSE);
+	details_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(details));
+	tag_display = gtk_text_buffer_create_tag(details_buffer, "display", "scale", 8.0, NULL);
+	tag_name = gtk_text_buffer_create_tag(details_buffer, "name", "scale", 1.5, "weight", PANGO_WEIGHT_BOLD, NULL);
+	tag_header = gtk_text_buffer_create_tag(details_buffer, "header", "weight", PANGO_WEIGHT_BOLD, NULL);
+	gtk_container_add(GTK_CONTAINER(scrolled), details);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), scrolled, gtk_label_new_with_mnemonic("Character _details"));
-#endif
 
 #ifdef TODO
 	scrolled = gtk_scrolled_window_new(NULL, NULL);
@@ -1164,8 +1571,6 @@ main(int argc, char *argv[])
 	int min_font_size_set = 0;
 	int max_font_size_set = 0;
 	const char *font_family = DEFAULT_FONT_FAMILY;
-	const struct libcmap_block *block;
-	const struct libcmap_script *script;
 	char *message;
 
 	ARGBEGIN {
@@ -1250,18 +1655,7 @@ main(int argc, char *argv[])
 	groups_tooltips = group_tooltips[listing];
 	ngroups_tooltips = ngroup_tooltips[listing];
 
-	switch (listing) {
-	case BY_BLOCK:
-		block = libcmap_find_block(selected_codepoint, NULL);
-		select_group(block ? (int)(block - libcmap_block_list) + 1 : 0);
-		break;
-	case BY_SCRIPT:
-		script = libcmap_find_script(selected_codepoint, NULL, NULL);
-		select_group(script ? (int)(script - libcmap_script_list) + 1 : 0);
-		break;
-	default:
-		abort();
-	}
+	select_group_for_codepoint(listing, selected_codepoint, 1);
 	GCMAP_CHAR_TABLE(chartable)->selection_callback = &character_cell_selected;
 	gcmap_char_table_select_codepoint(GCMAP_CHAR_TABLE(chartable), selected_codepoint);
 
@@ -1272,6 +1666,7 @@ main(int argc, char *argv[])
 	} else {
 		update_statusbar();
 	}
+	update_details();
 
 	gtk_window_present(GTK_WINDOW(window));
 	gtk_widget_grab_focus(GTK_WIDGET(chartable));
